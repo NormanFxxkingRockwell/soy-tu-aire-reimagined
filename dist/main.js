@@ -458,23 +458,36 @@ function drawRibbonWindow(score) {
     const headroom = Math.min(i, s.length - 1 - i);
     return headroom >= 3 ? 1 : (headroom + .35) / 3.35;
   };
+  // Each unbroken span is ONE closed polygon: forward along the +edge, then
+  // back along the -edge. Two separate subpaths would be implicitly closed by
+  // fill() with straight chords across the curve - those chords accumulated
+  // over 60Hz restamps into a light-gray mesh inside loops (user report).
   const layer = (offMul, wMul, style) => {
     worldCtx.fillStyle = style;
-    let open = false;
-    const edge = (i, sign) => {
-      const sm = s[i];
-      if (sm.break) { open = false; return; }
+    const point = (i, sign) => {
       const n = normalAt(i);
-      const w = sm.w * taper(i) * (offMul + sign * wMul * .5);
-      const x = sm.x + n.x * w, y = sm.y + n.y * w;
-      if (!open) { worldCtx.moveTo(x, y); open = true; }
-      else worldCtx.lineTo(x, y);
+      const w = s[i].w * taper(i) * (offMul + sign * wMul * .5);
+      return { x: s[i].x + n.x * w, y: s[i].y + n.y * w };
     };
     worldCtx.beginPath();
-    for (let i = 0; i < s.length; i++) edge(i, 1);
-    open = false;
-    for (let i = s.length - 1; i >= 0; i--) edge(i, -1);
-    worldCtx.closePath();
+    let segStart = 0;
+    for (let i = 0; i <= s.length; i++) {
+      if (i < s.length && !s[i].break) continue;
+      if (i > segStart) {
+        const first = point(segStart, 1);
+        worldCtx.moveTo(first.x, first.y);
+        for (let j = segStart + 1; j < i; j++) {
+          const q = point(j, 1);
+          worldCtx.lineTo(q.x, q.y);
+        }
+        for (let j = i - 1; j >= segStart; j--) {
+          const q = point(j, -1);
+          worldCtx.lineTo(q.x, q.y);
+        }
+        worldCtx.closePath();
+      }
+      segStart = i + 1;
+    }
     worldCtx.fill();
   };
   const last = s[s.length - 1];
