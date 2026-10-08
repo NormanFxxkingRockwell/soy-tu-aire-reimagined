@@ -14,6 +14,13 @@ const ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
 const fxCtx = fx.getContext("2d", { alpha: true });
 const buffer = document.createElement("canvas");
 const bufferCtx = buffer.getContext("2d", { alpha: true });
+// Persistent ink lives on a world canvas; the display canvas only shows the
+// camera window. This replaces the old whole-canvas shift-per-step (240
+// full-screen copies/s at climax scroll speed) with one blit per frame.
+const world = document.createElement("canvas");
+const worldCtx = world.getContext("2d", { alpha: true });
+const worldDpr = 1; // resolution trade-off taken from the reference build
+const WORLD_SCREENS = 2.5;
 
 const ui = {
   experience: $("#experience"), intro: $("#intro"), playStart: $("#playStart"),
@@ -77,7 +84,7 @@ const state = {
   beatPhase: 0, beatFlash: 0, energy: .2, score: null,
   pointer: { x: innerWidth * .55, y: innerHeight * .5, lastMove: -1e9, blend: 0 },
   brush: { x: innerWidth * .55, y: innerHeight * .5, vx: 0, vy: 0, px: innerWidth * .55, py: innerHeight * .5, nibT: 0, previousSpeed: 0, dirAngle: 0, widthEMA: 0, prevWidth: 0 },
-  wavePhase: 0, particles: [], figures: [], pools: [],
+  wavePhase: 0, cameraX: 0, ribbon: [], particles: [], figures: [], pools: [],
   dropTimer: 0, holdUntil: 0, holdPoint: null,
   recording: null, replay: null,
   raf: 0, lastFrame: performance.now(), seed: Math.random() * 1000, rng: null,
@@ -259,15 +266,19 @@ function resize() {
   state.width = innerWidth; state.height = innerHeight;
   state.dpr = Math.min(devicePixelRatio || 1, 2);
   state.scale = state.width / 640;
-  for (const target of [paper, canvas, fx, buffer]) {
+  for (const target of [paper, canvas, fx]) {
     target.width = Math.floor(state.width * state.dpr);
     target.height = Math.floor(state.height * state.dpr);
     if (target.style) { target.style.width = `${state.width}px`; target.style.height = `${state.height}px`; }
   }
+  world.width = Math.floor(state.width * WORLD_SCREENS * worldDpr);
+  world.height = Math.floor(state.height * worldDpr);
+  buffer.width = world.width;
+  buffer.height = world.height;
   paperCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   fxCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
-  bufferCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+  state.cameraX = 0;
   makePaper();
 }
 
@@ -346,11 +357,13 @@ function updateBrush(dt, score) {
   const selfLife = (1 - score.wave) * 8 + 6;
   const tx = target.x + noise(state.time * .8) * selfLife;
   const ty = target.y + noise(state.time * .91 + 8) * selfLife;
-  const spring = state.holdPoint ? 40 : 15 + score.wave * 9;
-  const damping = Math.pow(state.holdPoint ? .00001 : .0004, dt);
-  b.vx = (b.vx + (tx - b.x) * spring * dt) * damping;
-  b.vy = (b.vy + (ty - b.y) * spring * dt) * damping;
-  const maxVelocity = 2800;
+  // reference integrator: stiff spring with light damping tracks the pointer
+  // closely (the old soft spring lagged a full brush-length behind)
+  const spring = state.holdPoint ? 300 : 90;
+  const damping = state.holdPoint ? 30 : 14;
+  b.vx += ((tx - b.x) * spring - damping * b.vx) * dt;
+  b.vy += ((ty - b.y) * spring - damping * b.vy) * dt;
+  const maxVelocity = 3600;
   const magnitude = Math.hypot(b.vx, b.vy);
   if (magnitude > maxVelocity) { b.vx *= maxVelocity / magnitude; b.vy *= maxVelocity / magnitude; }
   b.px = b.x; b.py = b.y;
@@ -360,23 +373,24 @@ function updateBrush(dt, score) {
   if (!state.replay && state.recording) recordSample(state.recording, state.time, target.x, target.y);
 }
 
-function shiftInk(distance) {
-  state.shiftCarry += distance * state.dpr;
-  const devicePixels = Math.floor(state.shiftCarry);
-  if (devicePixels < 1) return;
-  state.shiftCarry -= devicePixels;
-  const cssShift = devicePixels / state.dpr;
-  for (const p of state.pools) p.x -= cssShift;
-  for (const p of state.particles) p.x -= cssShift;
-  for (const f of state.figures) f.x -= cssShift;
+function advanceCamera(distance) {
+  if (distance <= 0) return;
+  state.cameraX += distance;
+  if (state.cameraX <= state.width * 1.5) return;
+  // wrap: slide the world back one screen (the only full-canvas copy, once
+  // every ~screenW/scrollSpeed seconds) and rebase world-space objects
+  const shift = state.width;
+  const sd = Math.round(shift * worldDpr);
   bufferCtx.setTransform(1, 0, 0, 1, 0, 0);
   bufferCtx.clearRect(0, 0, buffer.width, buffer.height);
-  bufferCtx.drawImage(canvas, 0, 0);
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(buffer, -devicePixels, 0);
-  ctx.restore();
+  bufferCtx.drawImage(world, 0, 0);
+  worldCtx.setTransform(1, 0, 0, 1, 0, 0);
+  worldCtx.clearRect(0, 0, world.width, world.height);
+  worldCtx.drawImage(buffer, -sd, 0);
+  state.cameraX -= shift;
+  for (const p of state.pools) p.x -= shift;
+  for (const p of state.particles) p.x -= shift;
+  for (const f of state.figures) f.x -= shift;
 }
 
 // ---- brush model ported from the recovered engine: nib, pressure, dryness ----
@@ -401,115 +415,101 @@ function brushMetrics(score, dt) {
   const nib = .7 + .85 * Math.sin(.085 * b.nibT * 60);
   const nibFactor = (.28 + .72 * Math.abs(Math.sin(b.dirAngle - nib))) / (.28 + .72 * .637);
   b.previousSpeed = speed;
-  const base = state.width * .024;
-  const rawWidth = Math.max(base * .3, base * (.22 + 1.46 * pressure + 1.34 * headPool + .42 * climax)
-    * (1.24 - .88 * speedNorm) * nibFactor);
-  b.widthEMA = b.widthEMA ? b.widthEMA + (rawWidth - b.widthEMA) * Math.min(1, dt * 7) : rawWidth;
+  const base = state.width * .0062;
+  const rawWidth = Math.max(base * .22, base * (.2 + 1.55 * pressure + 1.55 * headPool + .45 * climax)
+    * (1.3 - 1.05 * Math.pow(speedNorm, .75)) * nibFactor);
+  b.widthEMA = b.widthEMA ? b.widthEMA + (rawWidth - b.widthEMA) * Math.min(1, dt * 10) : rawWidth;
   const alpha = clamp(.12 + .58 * pressure + .28 * headPool + .08 * climax, 0, 1);
   return { width: b.widthEMA, alpha, dryness, speed, speedNorm, headPool, climax, pressure };
 }
 
-function drawStroke(score, dt) {
+function pushRibbonSample(score, dt) {
   const b = state.brush;
   const m = brushMetrics(score, dt);
-  const width = m.width;
-  const w0 = b.prevWidth || width;
-  // smoothed normal from the nib direction: consecutive quads share edges, so
-  // short segments tile into one continuous ribbon instead of round-cap beads
-  const nx = Math.cos(b.dirAngle + Math.PI / 2), ny = Math.sin(b.dirAngle + Math.PI / 2);
+  state.ribbon.push({
+    x: state.cameraX + b.x, y: b.y,
+    w: m.width, a: m.alpha, dry: m.dryness, sp: m.speedNorm
+  });
+  if (state.ribbon.length > 48) state.ribbon.shift(); // ~0.4s window
+  const splatColor = score.blue ? BLUE_WASH : INK;
+  if (Math.random() < score.splat * 5 * (.4 + state.energy) * dt) spawnSplatter(state.cameraX + b.x, b.y, m.width, state.energy, splatColor);
+}
 
-  ctx.save();
-  ctx.globalCompositeOperation = "multiply";
-
-  const ribbon = (offMul, wMul, style) => {
-    const w0e = w0 * wMul, w1e = width * wMul;
-    if (w1e < .5 && w0e < .5) return;
-    ctx.fillStyle = style;
-    ctx.beginPath();
-    ctx.moveTo(b.px + nx * (offMul * w0 + w0e * .5), b.py + ny * (offMul * w0 + w0e * .5));
-    ctx.lineTo(b.x + nx * (offMul * width + w1e * .5), b.y + ny * (offMul * width + w1e * .5));
-    ctx.lineTo(b.x + nx * (offMul * width - w1e * .5), b.y + ny * (offMul * width - w1e * .5));
-    ctx.lineTo(b.px + nx * (offMul * w0 - w0e * .5), b.py + ny * (offMul * w0 - w0e * .5));
-    ctx.closePath();
-    ctx.fill();
-    // single round cap at the leading edge keeps the head alive between steps
-    ctx.beginPath();
-    ctx.arc(b.x + nx * offMul * width, b.y + ny * offMul * width, Math.max(.3, w1e * .5), 0, Math.PI * 2);
-    ctx.fill();
+// The ribbon is re-stamped every overlay tick as one continuous filled strip
+// (reference-engine window re-stamping): each paper location accumulates
+// ~18 overlapping stamps, so fast strokes stay solid and dark instead of
+// breaking into faint dots, and slowness soaks darker like real ink.
+function drawRibbonWindow(score) {
+  const s = state.ribbon;
+  if (s.length < 2) return;
+  worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
+  worldCtx.globalCompositeOperation = "multiply";
+  const normalAt = i => {
+    const p = s[Math.max(0, i - 1)], q = s[Math.min(s.length - 1, i + 1)];
+    const dx = q.x - p.x, dy = q.y - p.y;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x: -dy / len, y: dx / len };
   };
-
-  // wet bleed underlay
-  if (score.wet > .5 && width > 6) ribbon(0, 1.3, rgba(INK, m.alpha * .09 * score.wet));
-  // organic tonal drift keeps the ribbon from reading as a flat plastic tube
-  const tone = .8 + noise(state.time * 2.7) * .2;
-  // main body
-  ribbon(0, .94, rgba(INK, m.alpha * .38 * tone));
-  // dark core, offset to one side like a loaded nib
-  ribbon(-.11, .48, rgba(INK_CORE, m.alpha * .3));
-  // dry highlight streaks along the direction of travel
-  if (m.speedNorm > .06) {
-    ribbon(.06, Math.max(.02, .05), rgba(LIGHT, Math.min(.2, m.alpha * m.speedNorm * .8)));
-    ribbon(.16, Math.max(.02, .04), rgba(LIGHT, Math.min(.15, m.alpha * m.speedNorm * .6)));
-  }
-  // bristle split when the brush runs dry (spatial noise gates the streaks)
-  if (m.dryness > .42 && width > 1.6) {
-    const streaks = 2 + Math.round(m.dryness * 3);
-    for (let i = 0; i < streaks; i++) {
-      const gate = Math.abs(Math.sin(.017 * b.x + .031 * b.y + .73 * i * 2.1));
-      if (gate < .62) continue;
-      const off = -.28 + (i / Math.max(1, streaks - 1)) * .56;
-      ribbon(off, Math.max(.02, .03), rgba(LIGHT, m.alpha * m.dryness * .2));
+  const taper = i => {
+    const headroom = Math.min(i, s.length - 1 - i);
+    return headroom >= 3 ? 1 : (headroom + .35) / 3.35;
+  };
+  const layer = (offMul, wMul, style) => {
+    worldCtx.fillStyle = style;
+    worldCtx.beginPath();
+    for (let i = 0; i < s.length; i++) {
+      const n = normalAt(i);
+      const w = s[i].w * taper(i) * (offMul + wMul * .5);
+      const x = s[i].x + n.x * w, y = s[i].y + n.y * w;
+      i ? worldCtx.lineTo(x, y) : worldCtx.moveTo(x, y);
     }
-    for (let i = 0; i < 2; i++) {
-      ribbon((rand() - .5) * .5, Math.max(.02, .05), rgba(INK_CORE, m.alpha * m.dryness * .18));
+    for (let i = s.length - 1; i >= 0; i--) {
+      const n = normalAt(i);
+      const w = s[i].w * taper(i) * (offMul - wMul * .5);
+      worldCtx.lineTo(s[i].x + n.x * w, s[i].y + n.y * w);
     }
+    worldCtx.closePath();
+    worldCtx.fill();
+  };
+  const last = s[s.length - 1];
+  const tone = .9 + noise(state.time * 2.7) * .1;
+  if (score.wet > .5 && last.w > 4) layer(0, 1.3, rgba(INK, .08 * last.a));
+  layer(0, .94, rgba(INK, .17 * last.a * tone));
+  layer(-.11, .48, rgba(INK_CORE, .13 * last.a));
+  if (last.sp > .06) {
+    layer(.06, .05, rgba(LIGHT, Math.min(.09, .05 * last.sp)));
+    layer(.16, .04, rgba(LIGHT, Math.min(.06, .035 * last.sp)));
   }
-  // paper-grain speckles inside the fresh ink keep it from reading as vector
-  if (width > 3) {
-    const speckles = 3;
-    for (let i = 0; i < speckles; i++) {
-      const t = rand();
-      const sx = lerp(b.px, b.x, t) + nx * (rand() - .5) * width * .8;
-      const sy = lerp(b.py, b.y, t) + ny * (rand() - .5) * width * .8;
-      ctx.fillStyle = rand() < .5 ? rgba(LIGHT, m.alpha * .07) : rgba(INK_CORE, m.alpha * .06);
-      ctx.beginPath(); ctx.arc(sx, sy, .5 + rand() * width * .05, 0, Math.PI * 2); ctx.fill();
-    }
+  if (last.dry > .42) {
+    layer(-.28, .035, rgba(LIGHT, .05 * last.dry));
+    layer(.28, .035, rgba(LIGHT, .05 * last.dry));
+    layer(0, .05, rgba(INK_CORE, .05 * last.dry));
   }
-  ctx.restore();
-  b.prevWidth = width;
-
-  // a dwelling brush pools ink outward
-  if (m.speed < 150 * state.scale && score.wet > .5 && width > 6) {
-    const last = state.pools[state.pools.length - 1];
-    if (!last || Math.hypot(last.x - b.x, last.y - b.y) > width * 2.4) {
-      if (state.pools.length > 40) state.pools.shift();
-      state.pools.push({
-        x: b.x, y: b.y, r: width * .5,
-        maxR: width * (2 + rand() * 2),
-        growth: width * .55, alpha: .05 + score.wet * .05
-      });
-    }
-  }
-  const splatColor = INK;
-  if (rand() < score.splat * 10 * (.4 + state.energy) * dt) spawnSplatter(b.x, b.y, width, state.energy, splatColor);
+  // live brush head
+  worldCtx.fillStyle = rgba(INK, .16 * last.a);
+  worldCtx.beginPath();
+  worldCtx.arc(last.x, last.y, Math.max(.6, last.w * .47), 0, Math.PI * 2);
+  worldCtx.fill();
+  worldCtx.globalCompositeOperation = "source-over";
 }
 
 function stepPools(dt) {
   if (!state.pools.length) return;
+  worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
   const b = state.brush;
   const speed = Math.hypot(b.vx, b.vy);
-  ctx.save(); ctx.globalCompositeOperation = "multiply";
+  worldCtx.save(); worldCtx.globalCompositeOperation = "multiply";
   for (let i = state.pools.length - 1; i >= 0; i--) {
     const p = state.pools[i];
-    const near = Math.hypot(b.x - p.x, b.y - p.y) < p.maxR * 1.6;
+    const near = Math.hypot(state.cameraX + b.x - p.x, b.y - p.y) < p.maxR * 1.6;
     if (speed > 260 * state.scale || !near || p.r >= p.maxR) { state.pools.splice(i, 1); continue; }
     const grow = Math.min(p.growth * dt, p.maxR - p.r);
-    ctx.strokeStyle = rgba(INK, p.alpha);
-    ctx.lineWidth = Math.max(.6, grow * 2);
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.r + grow * .5, 0, Math.PI * 2); ctx.stroke();
+    worldCtx.strokeStyle = rgba(INK, p.alpha);
+    worldCtx.lineWidth = Math.max(.6, grow * 2);
+    worldCtx.beginPath(); worldCtx.arc(p.x, p.y, p.r + grow * .5, 0, Math.PI * 2); worldCtx.stroke();
     p.r += grow;
   }
-  ctx.restore();
+  worldCtx.restore();
 }
 
 function spawnSplatter(x, y, width, energy, color = INK, boost = 1) {
@@ -535,26 +535,26 @@ function stepParticles(dt) {
 
 function drawParticles() {
   if (!state.particles.length) return;
-  ctx.save(); ctx.globalCompositeOperation = "multiply";
+  worldCtx.save(); worldCtx.globalCompositeOperation = "multiply";
   for (const p of state.particles) {
     const a = p.alpha * clamp(p.life, 0, 1);
     const speed = Math.hypot(p.vx, p.vy);
     if (speed > 260) {
       // fast drops streak along their flight direction
       const k = clamp(speed / 900, 0, 1.6);
-      ctx.strokeStyle = rgba(p.color ?? INK, a);
-      ctx.lineWidth = p.radius * 1.5;
-      ctx.lineCap = "round";
-      ctx.beginPath();
-      ctx.moveTo(p.x - p.vx * .016 * k, p.y - p.vy * .016 * k);
-      ctx.lineTo(p.x, p.y);
-      ctx.stroke();
+      worldCtx.strokeStyle = rgba(p.color ?? INK, a);
+      worldCtx.lineWidth = p.radius * 1.5;
+      worldCtx.lineCap = "round";
+      worldCtx.beginPath();
+      worldCtx.moveTo(p.x - p.vx * .016 * k, p.y - p.vy * .016 * k);
+      worldCtx.lineTo(p.x, p.y);
+      worldCtx.stroke();
     } else {
-      ctx.fillStyle = rgba(p.color ?? INK, a);
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.fill();
+      worldCtx.fillStyle = rgba(p.color ?? INK, a);
+      worldCtx.beginPath(); worldCtx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); worldCtx.fill();
     }
   }
-  ctx.restore();
+  worldCtx.restore();
 }
 
 function triggerColorCue(cue) {
@@ -615,7 +615,7 @@ function triggerCue(cue) {
   if (config.burst) {
     // organic cluster bursts: several origins, big mixed drops, not a radial fan
     for (let cluster = 0; cluster < 4; cluster++) {
-      spawnSplatter(b.x + (rand() - .5) * state.width * .14, b.y + (rand() - .5) * state.height * .12,
+      spawnSplatter(state.cameraX + b.x + (rand() - .5) * state.width * .14, b.y + (rand() - .5) * state.height * .12,
         state.width * (.018 + rand() * .026), state.energy, INK, 2.6);
     }
   }
@@ -648,8 +648,8 @@ function stepFigures(dt) {
 
 function drawFigures() {
   if (!state.figures.length) return;
-  ctx.save();
-  ctx.globalCompositeOperation = "multiply";
+  worldCtx.save();
+  worldCtx.globalCompositeOperation = "multiply";
   for (const f of state.figures) {
     if (f.age < f.delay) continue;
     if (f.type === "drip") { drawDrip(f); continue; }
@@ -665,27 +665,27 @@ function drawFigures() {
     const h = f.type === "wordText" ? f.longSide * .46 : img.naturalHeight * scale;
     const x = f.x + f.drift * age - state.time % 1 * 2;
     const y = f.y - (f.rise ? f.rise * state.height * age : 0) + Math.sin(age * 2 + f.seed) * 4;
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(f.rot);
+    worldCtx.save();
+    worldCtx.translate(x, y);
+    worldCtx.rotate(f.rot);
     if (f.halo && age < .25) {
       const r = Math.max(w, h) * .85;
-      const g = ctx.createRadialGradient(0, 0, r * .3, 0, 0, r);
+      const g = worldCtx.createRadialGradient(0, 0, r * .3, 0, 0, r);
       g.addColorStop(0, rgba(RED_INK, .07)); g.addColorStop(1, rgba(RED_INK, 0));
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+      worldCtx.fillStyle = g;
+      worldCtx.beginPath(); worldCtx.arc(0, 0, r, 0, Math.PI * 2); worldCtx.fill();
     }
-    ctx.globalAlpha = alpha;
+    worldCtx.globalAlpha = alpha;
     if (f.type === "wordText") {
-      ctx.fillStyle = rgba(INK, 1);
-      ctx.font = `italic 600 ${Math.max(13, f.longSide * .38)}px Georgia, serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(f.text, 0, 0);
+      worldCtx.fillStyle = rgba(INK, 1);
+      worldCtx.font = `italic 600 ${Math.max(13, f.longSide * .38)}px Georgia, serif`;
+      worldCtx.textAlign = "center";
+      worldCtx.textBaseline = "middle";
+      worldCtx.fillText(f.text, 0, 0);
     } else {
       const drawX = f.anchors ? -f.anchors.entry.x * scale : -w / 2;
       const drawY = f.anchors ? -f.anchors.entry.y * scale : -h / 2;
-      ctx.drawImage(img, drawX, drawY, w, h);
+      worldCtx.drawImage(img, drawX, drawY, w, h);
     }
     if (f.print) {
       f.committed = true;
@@ -696,9 +696,9 @@ function drawFigures() {
         state.holdPoint = { x: x + dx * cos - dy * sin, y: y + dx * sin + dy * cos };
       }
     }
-    ctx.restore();
+    worldCtx.restore();
   }
-  ctx.restore();
+  worldCtx.restore();
 }
 
 // ---- ephemeral fx layer: brush halo + the blackout silhouette scene ----
@@ -852,7 +852,7 @@ function stepDrops(dt) {
   state.dropTimer = .16 + rand() * .18;
   const x = state.width * (.12 + rand() * .76);
   state.figures.push({
-    type: "drip", img: null, x, y: state.height * (.06 + rand() * .1),
+    type: "drip", img: null, x: state.cameraX + x, y: state.height * (.06 + rand() * .1),
     age: 0, delay: 0, life: 1.5 + rand() * .8,
     vy: 90 + rand() * 130, longSide: (2.2 + rand() * 3.4) * state.scale,
     rot: 0, rise: 0, drift: 0, seed: rand() * 100
@@ -863,24 +863,28 @@ function drawDrip(f) {
   const age = f.age;
   const y = f.y + f.vy * age + 120 * age * age;
   const tail = Math.min(170 * state.scale, age * 400 * state.scale);
-  ctx.save();
-  ctx.globalCompositeOperation = "multiply";
-  ctx.strokeStyle = rgba(INK, .2);
-  ctx.lineWidth = Math.max(.5, f.longSide * .26);
-  ctx.beginPath(); ctx.moveTo(f.x, f.y); ctx.lineTo(f.x, y - f.longSide); ctx.stroke();
-  ctx.fillStyle = rgba(INK, .5);
-  ctx.beginPath(); ctx.arc(f.x, y, f.longSide, 0, Math.PI * 2); ctx.fill();
+  worldCtx.save();
+  worldCtx.globalCompositeOperation = "multiply";
+  worldCtx.strokeStyle = rgba(INK, .2);
+  worldCtx.lineWidth = Math.max(.5, f.longSide * .26);
+  worldCtx.beginPath(); worldCtx.moveTo(f.x, f.y); worldCtx.lineTo(f.x, y - f.longSide); worldCtx.stroke();
+  worldCtx.fillStyle = rgba(INK, .5);
+  worldCtx.beginPath(); worldCtx.arc(f.x, y, f.longSide, 0, Math.PI * 2); worldCtx.fill();
   // splash when the drop lands
   if (!f.splashed && age > f.life * .75) {
     f.splashed = true;
     spawnSplatter(f.x, y, 2.4 * state.scale, .2, INK, 1.6);
   }
-  ctx.restore();
+  worldCtx.restore();
 }
 
 function fadeInk(amount) {
   if (amount <= 0) return;
-  ctx.save(); ctx.globalCompositeOperation = "destination-out"; ctx.fillStyle = `rgba(0,0,0,${clamp(amount, 0, .18)})`; ctx.fillRect(0, 0, state.width, state.height); ctx.restore();
+  worldCtx.setTransform(1, 0, 0, 1, 0, 0);
+  worldCtx.globalCompositeOperation = "destination-out";
+  worldCtx.fillStyle = `rgba(0,0,0,${clamp(amount, 0, .18)})`;
+  worldCtx.fillRect(state.cameraX * worldDpr, 0, state.width * 1.4 * worldDpr, world.height);
+  worldCtx.globalCompositeOperation = "source-over";
 }
 
 // ---- fixed-timestep loop ----
@@ -901,7 +905,7 @@ function step(dt) {
     if (live.beat) {
       state.beatFlash = 1;
       soundscape.thump(clamp(.25 + score.splat * .85, 0, 1));
-      if (score.splat > .18) spawnSplatter(state.brush.x, state.brush.y, Math.max(6, state.width * .014), state.energy, INK);
+      if (score.splat > .18) spawnSplatter(state.cameraX + state.brush.x, state.brush.y, Math.max(6, state.width * .014), state.energy, INK);
     }
   } else if (score.bpm > 1) {
     state.beatPhase += dt * score.bpm / 60;
@@ -909,7 +913,7 @@ function step(dt) {
       state.beatPhase -= 1;
       state.beatFlash = 1;
       soundscape.thump(clamp(.25 + score.splat * .85, 0, 1));
-      if (score.splat > .18) spawnSplatter(state.brush.x, state.brush.y, Math.max(6, state.width * .014), state.energy, INK);
+      if (score.splat > .18) spawnSplatter(state.cameraX + state.brush.x, state.brush.y, Math.max(6, state.width * .014), state.energy, INK);
     }
   }
   state.beatFlash = Math.max(0, state.beatFlash - dt * 2.6);
@@ -931,18 +935,13 @@ function step(dt) {
     * (4 + 15.5 * state.energy + 14 * params.climax) * (1 + .4 * pointerBias));
   state.debugScrollPct = scrollPct;
 
-  if (score.mode === "stroke") {
-    shiftInk(scrollPct / 100 * state.width * dt);
-    fadeInk(score.fade * dt * 60);
-    if (!state.holdPoint) drawStroke(score, dt);
-    stepPools(dt);
-  } else if (score.mode === "drops") {
-    shiftInk(scrollPct / 100 * state.width * dt);
-    fadeInk(score.fade * dt * 60);
-    stepDrops(dt);
-  } else if (score.mode === "fadeout") {
-    fadeInk(score.fade * dt * 60);
-    if (!state.holdPoint) drawStroke(score, dt);
+  if (score.mode === "stroke" || score.mode === "drops" || score.mode === "fadeout") {
+    if (score.mode !== "fadeout") advanceCamera(scrollPct / 100 * state.width * dt);
+    if (score.mode === "drops") stepDrops(dt);
+    else {
+      if (!state.holdPoint) pushRibbonSample(score, dt);
+      stepPools(dt);
+    }
   }
   stepParticles(dt);
   stepFigures(dt);
@@ -1003,11 +1002,20 @@ function frame() {
   if (!state.running) return;
   state.overlayAcc += elapsed;
   if (state.overlayAcc >= OVERLAY_DT) {
+    // fade the visible window plus a margin ahead, once per overlay tick
+    if (state.score && state.score.fade > 0) fadeInk(state.score.fade);
+    if (state.score && state.score.mode !== "drops") drawRibbonWindow(state.score);
+    worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
     drawParticles();
     drawFigures();
     drawFx();
     state.overlayAcc = 0;
   }
+  // camera window blit: the only per-frame copy of the ink
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const sx = Math.max(0, Math.min(world.width - Math.ceil(state.width * worldDpr), Math.floor(state.cameraX * worldDpr)));
+  ctx.drawImage(world, sx, 0, Math.ceil(state.width * worldDpr), world.height, 0, 0, canvas.width, canvas.height);
   updateChrome();
   soundscape.update(state.time, state.energy);
 }
@@ -1099,8 +1107,14 @@ function finish() {
 }
 
 function clearInk() {
-  ctx.clearRect(0, 0, state.width, state.height);
+  worldCtx.setTransform(1, 0, 0, 1, 0, 0);
+  worldCtx.clearRect(0, 0, world.width, world.height);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  fxCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   fxCtx.clearRect(0, 0, state.width, state.height);
+  state.cameraX = 0;
+  state.ribbon.length = 0;
   state.particles.length = 0; state.figures.length = 0; state.pools.length = 0; state.shiftCarry = 0;
 }
 
