@@ -128,17 +128,78 @@ const DIRECTED_LEGACY_TYPES = new Set(["photoFigure"]);
 const cuesBetween = (from, to) => eventsBetween(CUES, from, to)
   .filter(cue => !DIRECTED_LEGACY_TYPES.has(cue.type));
 
+const SONG_URL = "assets/song.m4a";
+const SONG_LEAD_IN = 4; // video time = song time + 4s (see docs/STATUS.md §4.6)
+
 class Soundscape {
-  constructor() { this.context = null; this.master = null; this.nodes = []; }
+  constructor() {
+    this.context = null; this.master = null; this.nodes = [];
+    this.song = null; this.analyser = null; this.freq = null;
+    this.rmsAvg = .05; this.beatCooldown = 0;
+  }
+  // The real recording is the master clock and the energy source when the
+  // private study build ships assets/song.m4a; otherwise fall back to the
+  // procedural placeholder so the experience still runs.
   async start() {
     if (!this.context) {
       this.context = new AudioContext();
       this.master = this.context.createGain();
-      this.master.gain.value = state.muted ? 0 : .12;
+      this.master.gain.value = state.muted ? 0 : .5;
       this.master.connect(this.context.destination);
-      this.build();
+      if (!await this.loadSong()) this.build();
     }
     if (this.context.state === "suspended") await this.context.resume();
+    if (this.song) {
+      this.song.currentTime = clamp(state.time - SONG_LEAD_IN, 0, this.song.duration || 233.7);
+      try { await this.song.play(); } catch { /* autoplay guard: user gesture already fired */ }
+    }
+  }
+  async loadSong() {
+    try {
+      const response = await fetch(SONG_URL);
+      if (!response.ok) return false;
+      const blob = await response.blob();
+      if (blob.size < 10000) return false;
+      const audio = new Audio(URL.createObjectURL(blob));
+      const source = this.context.createMediaElementSource(audio);
+      this.analyser = this.context.createAnalyser();
+      this.analyser.fftSize = 512;
+      this.analyser.smoothingTimeConstant = .55;
+      this.freq = new Uint8Array(this.analyser.frequencyBinCount);
+      this.wave = new Uint8Array(this.analyser.fftSize);
+      source.connect(this.analyser);
+      this.analyser.connect(this.master);
+      this.song = audio;
+      return true;
+    } catch { return false; }
+  }
+  get songMode() { return !!this.song; }
+  clockSeconds() {
+    // canonical timeline time: song time shifted into video time
+    if (this.song) return this.song.currentTime + SONG_LEAD_IN;
+    return this.context ? this.context.currentTime : performance.now() / 1000;
+  }
+  seekTo(seconds) {
+    if (this.song) this.song.currentTime = clamp(seconds - SONG_LEAD_IN, 0, this.song.duration || 233.7);
+  }
+  // live energy + onset detection; null in procedural mode. The mastered
+  // track is loud across all bands, so energy follows the time-domain RMS
+  // (verse ~.16 vs chorus ~.23) and onsets are RMS flux above a ~170ms
+  // moving average. Must be called with the simulation dt only.
+  measure(dt) {
+    if (!this.analyser) return null;
+    this.analyser.getByteTimeDomainData(this.wave);
+    let sum = 0;
+    for (let i = 0; i < this.wave.length; i++) { const v = (this.wave[i] - 128) / 128; sum += v * v; }
+    const rms = Math.sqrt(sum / this.wave.length);
+    const beat = this.beatCooldown <= 0 && rms > .05 && (rms > this.rmsAvg * 1.15 || rms > this.rmsAvg + .05);
+    this.rmsAvg += (rms - this.rmsAvg) * Math.min(1, dt * 3);
+    if (beat) this.beatCooldown = .22;
+    this.beatCooldown = Math.max(0, this.beatCooldown - dt);
+    return {
+      energy: clamp((rms - .02) / .25, .1, 1),
+      beat, rms
+    };
   }
   build() {
     const ctxA = this.context;
@@ -155,7 +216,7 @@ class Soundscape {
     this.nodes.push(pad, fifth, filter, gain);
   }
   thump(intensity = .5) {
-    if (!this.context || !this.master) return;
+    if (!this.context || !this.master || this.songMode) return;
     const t = this.context.currentTime;
     const osc = this.context.createOscillator();
     const gain = this.context.createGain();
@@ -171,17 +232,28 @@ class Soundscape {
   update(time, energy) {
     if (!this.context || !this.master) return;
     const now = this.context.currentTime;
+    if (this.songMode) {
+      this.master.gain.setTargetAtTime(state.muted ? 0 : .5, now, .1);
+      return;
+    }
     this.master.gain.setTargetAtTime(state.muted ? 0 : .05 + energy * .08, now, .18);
     const [pad, fifth, filter] = this.nodes;
     pad.frequency.setTargetAtTime(98 + Math.sin(time * .071) * 12, now, .3);
     fifth.frequency.setTargetAtTime(146.83 + Math.sin(time * .043) * 18, now, .4);
     filter.frequency.setTargetAtTime(320 + energy * 1150, now, .12);
   }
-  suspend() { return this.context?.state === "running" ? this.context.suspend() : Promise.resolve(); }
-  resume() { return this.context?.state === "suspended" ? this.context.resume() : Promise.resolve(); }
+  suspend() {
+    this.song?.pause();
+    return this.context?.state === "running" ? this.context.suspend() : Promise.resolve();
+  }
+  async resume() {
+    const p = this.context?.state === "suspended" ? this.context.resume() : Promise.resolve();
+    if (this.song && state.running && !state.paused) this.song.play().catch(() => {});
+    await p;
+  }
 }
 const soundscape = new Soundscape();
-const timelineClock = new TimelineClock(() => soundscape.context?.currentTime ?? performance.now() / 1000);
+const timelineClock = new TimelineClock(() => soundscape.clockSeconds());
 
 function resize() {
   state.width = innerWidth; state.height = innerHeight;
@@ -246,7 +318,7 @@ function brushTarget() {
   }
   if (state.holdPoint) return state.holdPoint;
   const score = state.score ?? scoreAt(state.time);
-  const amp = .17 + score.wave * .13;
+  const amp = .26 + score.wave * .18;
   const autoX = state.width * (.58 + Math.sin(state.wavePhase * .9) * .17);
   const autoY = state.height * (.47 + Math.sin(state.wavePhase) * amp + Math.sin(state.wavePhase * 2.3 + 1.3) * .05);
   const k = state.pointer.blend;
@@ -812,7 +884,17 @@ function step(dt) {
   state.score = score;
   const params = paramAt(state.time);
 
-  if (score.bpm > 1) {
+  // live bands from the real recording drive energy and onsets; the
+  // storyboard bpm is only the procedural fallback
+  const live = soundscape.measure(FIXED_DT);
+  if (live) {
+    state.energy = live.energy;
+    if (live.beat) {
+      state.beatFlash = 1;
+      soundscape.thump(clamp(.25 + score.splat * .85, 0, 1));
+      if (score.splat > .18) spawnSplatter(state.brush.x, state.brush.y, Math.max(6, state.width * .014), state.energy, INK);
+    }
+  } else if (score.bpm > 1) {
     state.beatPhase += dt * score.bpm / 60;
     if (state.beatPhase >= 1) {
       state.beatPhase -= 1;
@@ -822,24 +904,30 @@ function step(dt) {
     }
   }
   state.beatFlash = Math.max(0, state.beatFlash - dt * 2.6);
-  const phrase = .5 + .5 * Math.sin(state.time * .21 - 1.2);
-  state.energy = clamp(.16 + state.beatFlash * .5 + phrase * .26, 0, 1);
+  if (!live) {
+    const phrase = .5 + .5 * Math.sin(state.time * .21 - 1.2);
+    state.energy = clamp(.16 + state.beatFlash * .5 + phrase * .26, 0, 1);
+  }
 
   updatePointerBlend(dt);
   updateBrush(dt, score);
 
-  // camera scroll: base % per segment × choreography velocity × energy/climax
+  // Camera scroll ported from the reference engine and calibrated against the
+  // original recording (video measurements: 4.7-6.3% width/s mid-song):
+  // velocidad × (84 + 360·energy + 360·climax) × (1 + .55·pointerX) world px/s
+  // over a ~2167px view = (3.9 + 16.6·energy + 16.6·climax) % per second.
   const pointerBias = state.pointer.blend * (state.pointer.x / state.width - .5) * 2;
-  const scrollRate = score.scroll / 100 * params.velocidad
-    * (1 + .3 * state.energy + .6 * params.climax) * (1 + .4 * pointerBias);
+  const scrollPct = Math.min(6.5, params.velocidad * .38
+    * (3.9 + 16.6 * state.energy + 16.6 * params.climax) * (1 + .55 * pointerBias));
+  state.debugScrollPct = scrollPct;
 
   if (score.mode === "stroke") {
-    shiftInk(scrollRate * state.width * dt);
+    shiftInk(scrollPct / 100 * state.width * dt);
     fadeInk(score.fade * dt * 60);
     if (!state.holdPoint) drawStroke(score, dt);
     stepPools(dt);
   } else if (score.mode === "drops") {
-    shiftInk(scrollRate * state.width * dt);
+    shiftInk(scrollPct / 100 * state.width * dt);
     fadeInk(score.fade * dt * 60);
     stepDrops(dt);
   } else if (score.mode === "fadeout") {
@@ -934,19 +1022,22 @@ async function start() {
   ui.replayBadge.classList.remove("is-visible");
   ui.endRestart.classList.remove("is-visible"); ui.endReplay.classList.remove("is-visible");
   state.running = true; state.paused = false; state.replay = null;
-  state.time = 0; state.previousTime = 0; state.accumulator = 0; state.overlayAcc = 0;
   state.beatPhase = 0; state.beatFlash = 0; state.energy = .2; state.wavePhase = 0;
   state.pointer.blend = 0;
   state.seed = Math.random() * 1000; resetRng();
-  state.recording = createRecording({ noise: state.seed }, 1 / FIXED_DT);
   state.dropTimer = 0;
   state.holdUntil = 0; state.holdPoint = null;
+  // the song (when present) becomes the master clock; the timeline then
+  // begins where the recording begins — video t = song t + 4s
+  await soundscape.start();
+  const t0 = soundscape.songMode ? SONG_LEAD_IN : 0;
+  state.time = t0; state.previousTime = t0; state.accumulator = 0; state.overlayAcc = 0;
+  state.recording = createRecording({ noise: state.seed }, 1 / FIXED_DT, t0);
   const t = brushTarget();
   state.brush.x = state.brush.px = t.x; state.brush.y = state.brush.py = t.y;
   state.brush.vx = state.brush.vy = 0;
-  await soundscape.start();
-  timelineClock.reset(0);
-  state.lastFrame = 0;
+  timelineClock.reset(t0);
+  state.lastFrame = t0;
   state.raf = requestAnimationFrame(frame);
 }
 
@@ -959,16 +1050,19 @@ async function replayRecording() {
   state.running = true; state.paused = false;
   state.replay = state.recording;
   state.seed = state.replay.seed.noise; resetRng();
-  state.time = 0; state.previousTime = 0; state.accumulator = 0; state.overlayAcc = 0;
+  const rt0 = state.replay.t0 || 0;
+  // restart the song from the recording's own start time, then continue
+  state.time = rt0; state.previousTime = rt0;
+  await soundscape.start();
+  state.accumulator = 0; state.overlayAcc = 0;
   state.beatPhase = 0; state.beatFlash = 0; state.energy = .2; state.wavePhase = 0;
   state.dropTimer = 0;
   state.holdUntil = 0; state.holdPoint = null;
-  const s = sampleAt(state.replay, 0);
+  const s = sampleAt(state.replay, rt0);
   state.brush.x = state.brush.px = s.x; state.brush.y = state.brush.py = s.y;
   state.brush.vx = state.brush.vy = 0;
-  await soundscape.start();
-  timelineClock.reset(0);
-  state.lastFrame = 0;
+  timelineClock.reset(rt0);
+  state.lastFrame = rt0;
   state.raf = requestAnimationFrame(frame);
 }
 
@@ -977,8 +1071,9 @@ async function togglePause() {
   if (!state.paused) {
     state.paused = true; cancelAnimationFrame(state.raf); soundscape.suspend();
   } else {
+    state.paused = false;
     await soundscape.resume();
-    state.paused = false; state.lastFrame = timelineClock.now();
+    state.lastFrame = timelineClock.now();
     state.raf = requestAnimationFrame(frame);
   }
 }
@@ -1025,7 +1120,7 @@ ui.scrubber.addEventListener("click", event => {
   const rect = ui.scrubber.getBoundingClientRect();
   const next = clamp((event.clientX - rect.left) / rect.width, 0, 1) * DURATION;
   state.time = next; state.previousTime = next; state.accumulator = 0;
-  timelineClock.seek(next); state.lastFrame = next;
+  timelineClock.seek(next); state.lastFrame = next; soundscape.seekTo(next);
   state.recording = null; // a seeked timeline can't be replayed as one gesture
   state.holdUntil = 0; state.holdPoint = null;
   clearInk();
@@ -1039,4 +1134,5 @@ addEventListener("resize", resize, { passive: true });
 document.addEventListener("visibilitychange", () => { if (document.hidden && state.running && !state.paused) togglePause(); });
 
 resize();
-window.__inkState = state; // manual testing handle for the canvas experience
+window.__inkState = state; // manual testing handles for the canvas experience
+window.__inkSoundscape = soundscape;
