@@ -34,7 +34,10 @@ const ui = {
 // density is identical on any display refresh rate.
 const FIXED_DT = 1 / 120;
 const OVERLAY_DT = 1 / 60;
-const MAX_STEPS_PER_FRAME = 8;
+// 32 steps cover the full 250ms elapsed-time clamp at 120Hz. The song is the
+// master clock, so a slow render frame must catch up instead of silently
+// discarding simulation time and letting the choreography drift behind audio.
+const MAX_STEPS_PER_FRAME = 32;
 const INK = [18, 18, 20];
 const INK_CORE = [10, 10, 12];
 const LIGHT = [216, 214, 208];
@@ -84,7 +87,7 @@ const state = {
   beatPhase: 0, beatFlash: 0, energy: .2, score: null,
   pointer: { x: innerWidth * .55, y: innerHeight * .5, lastMove: -1e9, blend: 0 },
   brush: { x: innerWidth * .55, y: innerHeight * .5, vx: 0, vy: 0, px: innerWidth * .55, py: innerHeight * .5, nibT: 0, previousSpeed: 0, dirAngle: 0, widthEMA: 0, prevWidth: 0 },
-  wavePhase: 0, cameraX: 0, ribbon: [], particles: [], figures: [], pools: [],
+  wavePhase: 0, cameraX: 0, ribbon: [], ribbonSerial: 0, particles: [], figures: [], pools: [],
   dropTimer: 0, holdUntil: 0, holdPoint: null,
   recording: null, replay: null,
   raf: 0, lastFrame: performance.now(), seed: Math.random() * 1000, rng: null,
@@ -105,6 +108,10 @@ function mulberry32(a) {
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 const noise = n => Math.sin(n * 12.9898 + state.seed) * .5 + Math.sin(n * 3.171 + 4.2) * .5;
+const hash01 = n => {
+  const value = Math.sin(n * 12.9898 + state.seed * .17) * 43758.5453;
+  return value - Math.floor(value);
+};
 const format = seconds => `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
 const rgba = ([r, g, b], a) => `rgba(${r},${g},${b},${a})`;
 
@@ -430,11 +437,12 @@ function pushRibbonSample(score, dt) {
   const m = brushMetrics(score, dt);
   state.ribbon.push({
     x: state.cameraX + b.x, y: b.y,
-    w: m.width, a: m.alpha, dry: m.dryness, sp: m.speedNorm
+    w: m.width, a: m.alpha, dry: m.dryness, sp: m.speedNorm,
+    grain: state.ribbonSerial++
   });
   if (state.ribbon.length > 48) state.ribbon.shift(); // ~0.4s window
   const splatColor = score.blue ? BLUE_WASH : INK;
-  if (Math.random() < score.splat * 5 * (.4 + state.energy) * dt) spawnSplatter(state.cameraX + b.x, b.y, m.width, state.energy, splatColor);
+  if (rand() < score.splat * 5 * (.4 + state.energy) * dt) spawnSplatter(state.cameraX + b.x, b.y, m.width, state.energy, splatColor);
 }
 
 // The ribbon is re-stamped every overlay tick as one continuous filled strip
@@ -463,11 +471,12 @@ function drawRibbonWindow(score) {
   // back along the -edge. Two separate subpaths would be implicitly closed by
   // fill() with straight chords across the curve - those chords accumulated
   // over 60Hz restamps into a light-gray mesh inside loops (user report).
-  const layer = (offMul, wMul, style) => {
-    worldCtx.fillStyle = style;
+  const traceLayer = (offMul, wMul, roughness = 0) => {
     const point = (i, sign) => {
       const n = normalAt(i);
-      const w = s[i].w * taper(i) * (offMul + sign * wMul * .5);
+      const rough = (hash01((s[i].grain ?? i) * 2.31 + sign * 17.7) - .5)
+        * s[i].w * roughness * (.35 + .65 * s[i].dry);
+      const w = s[i].w * taper(i) * (offMul + sign * wMul * .5) + rough;
       return { x: s[i].x + n.x * w, y: s[i].y + n.y * w };
     };
     worldCtx.beginPath();
@@ -489,14 +498,46 @@ function drawRibbonWindow(score) {
       }
       segStart = i + 1;
     }
+  };
+  const layer = (offMul, wMul, style, roughness = 0) => {
+    worldCtx.fillStyle = style;
+    traceLayer(offMul, wMul, roughness);
     worldCtx.fill();
   };
   const last = s[s.length - 1];
   const tone = .9 + noise(state.time * 2.7) * .1;
-  if (score.wet > .5 && last.w > 4) layer(0, 1.3, rgba(INK, .08 * last.a));
-  layer(0, .94, rgba(INK, .17 * last.a * tone));
-  layer(-.11, .48, rgba(INK_CORE, .13 * last.a));
-  // flying white reads as in-stroke texture in the original — no side lines
+  if (score.wet > .5 && last.w > 4) layer(0, 1.3, rgba(INK, .08 * last.a), .075);
+  layer(0, .94, rgba(INK, .17 * last.a * tone), .055);
+  layer(-.11, .48, rgba(INK_CORE, .13 * last.a), .025);
+
+  // Stable pigment gaps reveal the paper fibre without drawing the parallel
+  // highlight lines that caused the earlier "line bundle" regression. Each
+  // fleck is tied to a ribbon sample, so repeated window stamps deepen the ink
+  // around it while preserving the same irregular grain.
+  worldCtx.save();
+  traceLayer(0, .88, .04);
+  worldCtx.clip();
+  worldCtx.globalCompositeOperation = "destination-out";
+  for (let i = Math.max(1, s.length - 28); i < s.length; i += 2) {
+    const sample = s[i];
+    if (sample.break || sample.w < 1.4) continue;
+    const prev = s[Math.max(0, i - 1)], next = s[Math.min(s.length - 1, i + 1)];
+    const angle = Math.atan2(next.y - prev.y, next.x - prev.x);
+    const n = normalAt(i);
+    const r1 = hash01((sample.grain ?? i) * 3.17 + 5.2);
+    const r2 = hash01((sample.grain ?? i) * 5.93 + 9.4);
+    const across = (r1 - .5) * sample.w * .72;
+    worldCtx.save();
+    worldCtx.translate(sample.x + n.x * across, sample.y + n.y * across);
+    worldCtx.rotate(angle + (r2 - .5) * .35);
+    worldCtx.fillStyle = `rgba(0,0,0,${.008 + sample.dry * .018})`;
+    worldCtx.beginPath();
+    worldCtx.ellipse(0, 0, Math.max(.45, sample.w * (.06 + .12 * r1)), Math.max(.28, sample.w * (.012 + .025 * r2)), 0, 0, Math.PI * 2);
+    worldCtx.fill();
+    worldCtx.restore();
+  }
+  worldCtx.restore();
+
   // live brush head
   worldCtx.fillStyle = rgba(INK, .16 * last.a);
   worldCtx.beginPath();
@@ -558,10 +599,11 @@ function drawParticles() {
 
 function triggerColorCue(cue) {
   const b = state.brush;
+  const worldX = state.cameraX + b.x;
   if (cue.type === "blueDroplets") {
     for (let i = 0; i < 3; i++) {
       spawnSplatter(
-        b.x + (rand() - .5) * state.width * .06,
+        worldX + (rand() - .5) * state.width * .06,
         b.y + (rand() - .5) * state.height * .06,
         state.width * (.008 + rand() * .008),
         .35,
@@ -572,24 +614,25 @@ function triggerColorCue(cue) {
     return;
   }
   if (cue.type !== "bluePetals") return;
-  ctx.save();
-  ctx.globalCompositeOperation = "multiply";
-  ctx.translate(b.x - state.width * .025, b.y);
-  ctx.rotate(b.dirAngle);
+  worldCtx.save();
+  worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
+  worldCtx.globalCompositeOperation = "multiply";
+  worldCtx.translate(worldX - state.width * .025, b.y);
+  worldCtx.rotate(b.dirAngle);
   for (let i = 0; i < 6; i++) {
     const angle = -.85 + i * .3;
     const long = state.width * (.045 + i * .004);
     const short = long * (.18 + i * .015);
-    ctx.save();
-    ctx.rotate(angle);
-    ctx.fillStyle = rgba(BLUE_WASH, .08 + i * .018);
-    ctx.beginPath();
-    ctx.ellipse(-long * .2, 0, long, short, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+    worldCtx.save();
+    worldCtx.rotate(angle);
+    worldCtx.fillStyle = rgba(BLUE_WASH, .08 + i * .018);
+    worldCtx.beginPath();
+    worldCtx.ellipse(-long * .2, 0, long, short, 0, 0, Math.PI * 2);
+    worldCtx.fill();
+    worldCtx.restore();
   }
-  ctx.restore();
-  spawnSplatter(b.x, b.y, state.width * .012, .45, BLUE_WASH, 1.1);
+  worldCtx.restore();
+  spawnSplatter(worldX, b.y, state.width * .012, .45, BLUE_WASH, 1.1);
 }
 
 // ---- semantic figures: sprites stamped onto the ink like real marks ----
@@ -994,7 +1037,8 @@ function frame() {
     steps++;
     if (!state.running) break;
   }
-  if (steps === MAX_STEPS_PER_FRAME) state.accumulator = 0;
+  // elapsed is capped at 250ms and MAX_STEPS_PER_FRAME covers that full
+  // interval. Keep any sub-step remainder; never throw song time away.
   if (!state.running) return;
   state.overlayAcc += elapsed;
   if (state.overlayAcc >= OVERLAY_DT) {
@@ -1109,6 +1153,7 @@ function clearInk() {
   fxCtx.clearRect(0, 0, state.width, state.height);
   state.cameraX = 0;
   state.ribbon.length = 0;
+  state.ribbonSerial = 0;
   state.holdPoint = null; state.holdUntil = 0;
   state.particles.length = 0; state.figures.length = 0; state.pools.length = 0; state.shiftCarry = 0;
 }
