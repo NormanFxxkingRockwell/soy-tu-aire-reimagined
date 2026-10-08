@@ -314,7 +314,7 @@ function makePaper() {
 function brushTarget() {
   if (state.replay) {
     const s = sampleAt(state.replay, state.time);
-    return s ? { x: s.x, y: s.y } : { x: state.width * .55, y: state.height * .5 };
+    return s ? clampTarget(s.x, s.y) : { x: state.width * .55, y: state.height * .5 };
   }
   if (state.holdPoint) return state.holdPoint;
   const score = state.score ?? scoreAt(state.time);
@@ -322,7 +322,16 @@ function brushTarget() {
   const autoX = state.width * (.58 + Math.sin(state.wavePhase * .9) * .17);
   const autoY = state.height * (.47 + Math.sin(state.wavePhase) * amp + Math.sin(state.wavePhase * 2.3 + 1.3) * .05);
   const k = state.pointer.blend;
-  return { x: lerp(autoX, state.pointer.x, k), y: lerp(autoY, state.pointer.y, k) };
+  // the brush never hugs the right edge: the canvas ahead stays blank so the
+  // scroll always reveals fresh paper, exactly like the original
+  return clampTarget(lerp(autoX, state.pointer.x, k), lerp(autoY, state.pointer.y, k));
+}
+
+function clampTarget(x, y) {
+  return {
+    x: clamp(x, state.width * .08, state.width * .7),
+    y: clamp(y, state.height * .07, state.height * .93)
+  };
 }
 
 function updatePointerBlend(dt) {
@@ -912,13 +921,14 @@ function step(dt) {
   updatePointerBlend(dt);
   updateBrush(dt, score);
 
-  // Camera scroll ported from the reference engine and calibrated against the
-  // original recording (video measurements: 4.7-6.3% width/s mid-song):
-  // velocidad × (84 + 360·energy + 360·climax) × (1 + .55·pointerX) world px/s
-  // over a ~2167px view = (3.9 + 16.6·energy + 16.6·climax) % per second.
+  // Camera scroll ported from the reference engine and calibrated against
+  // cross-correlation measurements of the original video (tools/measure_scroll.py):
+  // 17-22%/s mid-song, 38% at the energetic section, 53-57% at the climax.
+  // The reference formula (84 + 360·energy + 360·climax) world px/s over a
+  // ~2167px view matches those numbers when driven by real song energy.
   const pointerBias = state.pointer.blend * (state.pointer.x / state.width - .5) * 2;
-  const scrollPct = Math.min(6.5, params.velocidad * .38
-    * (3.9 + 16.6 * state.energy + 16.6 * params.climax) * (1 + .55 * pointerBias));
+  const scrollPct = Math.min(58, params.velocidad * 2.1
+    * (4 + 15.5 * state.energy + 14 * params.climax) * (1 + .4 * pointerBias));
   state.debugScrollPct = scrollPct;
 
   if (score.mode === "stroke") {
