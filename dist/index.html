@@ -1,67 +1,59 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#e8e4dc" />
-    <meta name="description" content="一场由你的手势和音乐共同完成的水墨长卷。" />
-    <title>画一首歌 · Pintando una canción</title>
+    <meta name="theme-color" content="#e0ddd7" />
+    <meta name="description" content="Pintando una Canción — réplica interactiva del estudio de 2009 Soy tu aire." />
+    <title>Pintando una Canción · Soy tu aire</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main id="experience" aria-label="画一首歌互动体验">
+    <main id="experience" aria-label="Pintando una Canción, experiencia interactiva">
       <canvas id="paper" aria-hidden="true"></canvas>
-      <canvas id="ink" aria-label="跟随指针生成的互动水墨画布"></canvas>
+      <div id="bokeh" aria-hidden="true"></div>
+      <canvas id="ink" aria-label="lienzo de tinta que sigue el puntero"></canvas>
+      <div id="vignette" aria-hidden="true"></div>
+      <div id="blackout" aria-hidden="true"></div>
+      <canvas id="fx" aria-hidden="true"></canvas>
 
-      <header class="hud hud--top">
-        <div class="brand">
-          <span class="brand__eyebrow">PINTANDO UNA CANCIÓN</span>
-          <span class="brand__title">画一首歌</span>
+      <header class="chrome chrome--top">
+        <span class="chrome__title">Pintando una Canción</span>
+        <div class="scrubber" id="scrubber" role="progressbar" aria-label="progreso de la canción" aria-valuemin="0" aria-valuemax="244" aria-valuenow="0">
+          <span class="scrubber__track"><span class="scrubber__fill" id="scrubberFill"></span></span>
+          <span class="scrubber__dot" id="scrubberDot"></span>
         </div>
-        <button class="round-button" id="aboutButton" type="button" aria-label="查看作品说明">i</button>
       </header>
 
-      <section class="intro" id="intro" aria-labelledby="introTitle">
-        <p class="intro__kicker">A GENERATIVE INK EXPERIENCE</p>
-        <h1 id="introTitle">让手势成为旋律的<br />另一条声部</h1>
-        <p class="intro__copy">移动鼠标或手指。你决定方向，音乐决定墨色、重量与意外。</p>
-        <button class="start-button" id="startButton" type="button">
-          <span>开始作画</span><i aria-hidden="true">↗</i>
+      <span class="chrome chrome--logo" aria-label="Labuat">Labuat</span>
+      <span class="chrome chrome--credits" id="creditsButton" role="button" tabindex="0">Créditos</span>
+
+      <section class="intro" id="intro" aria-labelledby="playStart">
+        <button class="play" id="playStart" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13-8z"/></svg>
+          <span>play</span>
         </button>
-        <p class="intro__note">当前使用原创程序化声场 · 建议佩戴耳机</p>
+        <p class="intro__hint">mueve el ratón · tu gesto pinta la canción</p>
       </section>
 
-      <div class="gesture-hint" id="gestureHint" aria-hidden="true">
-        <span class="gesture-hint__line"></span>
-        <span>移动，让墨迹呼吸</span>
-      </div>
+      <div class="replay-badge" id="replayBadge" role="status">↺ repetir tu versión</div>
+      <p class="end-url" id="endUrl" aria-live="polite">soytuaire.labuat.com</p>
 
-      <footer class="player" id="player" aria-label="播放控制">
-        <button id="playButton" type="button" aria-label="暂停">Ⅱ</button>
-        <div class="progress" id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="244" aria-valuenow="0">
-          <span class="progress__fill" id="progressFill"></span>
-        </div>
-        <time id="timeLabel">00:00 / 04:04</time>
-        <button id="soundButton" type="button" aria-label="关闭声音">声</button>
-        <button id="restartButton" type="button" aria-label="重新开始">↻</button>
-      </footer>
+      <div class="end-actions">
+        <button class="mini-button" id="endReplay" type="button" title="repetir tu versión">↺</button>
+        <button class="mini-button" id="endRestart" type="button" title="empezar de nuevo">↻</button>
+      </div>
 
       <dialog id="aboutDialog" class="about">
         <form method="dialog">
-          <button class="about__close" aria-label="关闭说明">×</button>
-          <p class="intro__kicker">ABOUT THIS STUDY</p>
-          <h2>一幅会记住你的长卷</h2>
-          <p>这是对 2009 年《Soy tu aire》互动作品的独立研究与致敬。鼠标控制轨迹，预编排的音乐时间线控制笔锋、墨色、飞溅与画面的张弛。</p>
-          <p>当前版本使用原创程序化声场，不包含或分发原歌曲与原作素材。未来可在获得授权后接入正式音源。</p>
+          <button class="about__close" aria-label="cerrar">×</button>
+          <p class="about__kicker">CRÉDITOS</p>
+          <h2>Pintando una Canción</h2>
+          <p>这是对 2009 年 Herraiz Soto &amp; Co. 为 Labuat《Soy tu aire》制作的 Flash 互动作品的独立研究与一比一复刻。鼠标决定轨迹,歌曲时间线决定笔锋、墨色与图形。</p>
+          <p>当前使用原创程序化声场占位,不包含或分发原歌曲与原作素材。空格键暂停/继续,M 键静音,点击进度条可跳转。</p>
           <div class="about__meta"><span>Canvas 2D</span><span>Web Audio</span><span>Pointer Events</span></div>
         </form>
       </dialog>
-
-      <div class="end-card" id="endCard" aria-live="polite">
-        <p>这一次，画面记住了你的手势。</p>
-        <h2>再画一遍，也不会相同。</h2>
-        <button class="start-button" id="endRestartButton" type="button"><span>重新开始</span><i aria-hidden="true">↻</i></button>
-      </div>
     </main>
     <script type="module" src="./main.js"></script>
   </body>
