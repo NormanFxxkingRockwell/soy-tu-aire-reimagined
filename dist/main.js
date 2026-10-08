@@ -1,9 +1,12 @@
 import { COLOR_CUES, DURATION, scoreAt } from "./timeline.js";
-import { PARAMS, CUES } from "./choreography.js";
+import { CUES } from "./choreography.js";
 import { createRecording, recordSample, sampleAt } from "./replay.js";
 import { CREATURE_ASSETS, PAPER_TEXTURE } from "./assets.js";
 import { TimelineClock } from "./timeline-clock.js";
 import { DIRECTED_CUES } from "./directed-choreography.js";
+import { clampToViewport } from "./pointer-target.js";
+import { paramAt } from "./params.js";
+import { mediaTimelineSeconds } from "./audio-clock.js";
 
 const $ = selector => document.querySelector(selector);
 const paper = $("#paper");
@@ -85,10 +88,10 @@ const state = {
   running: false, paused: false, muted: false,
   time: 0, previousTime: 0, accumulator: 0, overlayAcc: 0,
   beatPhase: 0, beatFlash: 0, energy: .2, score: null,
-  pointer: { x: innerWidth * .55, y: innerHeight * .5, lastMove: -1e9, blend: 0 },
+  pointer: { x: innerWidth * .55, y: innerHeight * .5, active: false, id: null, type: "mouse" },
   brush: { x: innerWidth * .55, y: innerHeight * .5, vx: 0, vy: 0, px: innerWidth * .55, py: innerHeight * .5, nibT: 0, previousSpeed: 0, dirAngle: 0, widthEMA: 0, prevWidth: 0 },
-  wavePhase: 0, cameraX: 0, ribbon: [], ribbonSerial: 0, particles: [], figures: [], pools: [],
-  dropTimer: 0, holdUntil: 0, holdPoint: null,
+  wavePhase: 0, cameraX: 0, ribbon: [], ribbonSerial: 0, particles: [], bluePetals: [], figures: [], pools: [],
+  dropTimer: 0, holdUntil: 0, holdPoint: null, holdPaint: true, pendingResume: null,
   recording: null, replay: null,
   raf: 0, lastFrame: performance.now(), seed: Math.random() * 1000, rng: null,
   shiftCarry: 0
@@ -115,24 +118,6 @@ const hash01 = n => {
 const format = seconds => `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
 const rgba = ([r, g, b], a) => `rgba(${r},${g},${b},${a})`;
 
-// Recovered choreography: interpolate pressure / velocity / climax keyframes.
-function paramAt(seconds) {
-  if (!PARAMS.length) return { presion: .5, velocidad: 1, climax: 0 };
-  const t = clamp(seconds, PARAMS[0].t, PARAMS[PARAMS.length - 1].t);
-  let lo = 0, hi = PARAMS.length - 1;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if (PARAMS[mid].t <= t) lo = mid; else hi = mid;
-  }
-  const a = PARAMS[lo], b = PARAMS[hi];
-  const k = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
-  return {
-    presion: lerp(a.presion, b.presion, k),
-    velocidad: lerp(a.velocidad, b.velocidad, k),
-    climax: lerp(a.climax, b.climax, k)
-  };
-}
-
 function eventsBetween(events, from, to) {
   if (to < from) return [];
   return events.filter(event => event.at > from && event.at <= to);
@@ -150,6 +135,7 @@ class Soundscape {
     this.context = null; this.master = null; this.nodes = [];
     this.song = null; this.analyser = null; this.freq = null;
     this.rmsAvg = .05; this.beatCooldown = 0;
+    this.songEndedAt = null;
   }
   // The real recording is the master clock and the energy source when the
   // private study build ships assets/song.m4a; otherwise fall back to the
@@ -164,6 +150,7 @@ class Soundscape {
     }
     if (this.context.state === "suspended") await this.context.resume();
     if (this.song) {
+      this.songEndedAt = null;
       this.song.currentTime = clamp(state.time - SONG_LEAD_IN, 0, this.song.duration || 233.7);
       try { await this.song.play(); } catch { /* autoplay guard: user gesture already fired */ }
     }
@@ -181,6 +168,7 @@ class Soundscape {
       this.analyser.smoothingTimeConstant = .55;
       this.freq = new Uint8Array(this.analyser.frequencyBinCount);
       this.wave = new Uint8Array(this.analyser.fftSize);
+      audio.addEventListener("ended", () => { this.songEndedAt = this.context.currentTime; });
       source.connect(this.analyser);
       this.analyser.connect(this.master);
       this.song = audio;
@@ -190,11 +178,14 @@ class Soundscape {
   get songMode() { return !!this.song; }
   clockSeconds() {
     // canonical timeline time: song time shifted into video time
-    if (this.song) return this.song.currentTime + SONG_LEAD_IN;
-    return this.context ? this.context.currentTime : performance.now() / 1000;
+    const contextSeconds = this.context ? this.context.currentTime : performance.now() / 1000;
+    return mediaTimelineSeconds(this.song, SONG_LEAD_IN, contextSeconds, this.songEndedAt);
   }
   seekTo(seconds) {
-    if (this.song) this.song.currentTime = clamp(seconds - SONG_LEAD_IN, 0, this.song.duration || 233.7);
+    if (this.song) {
+      this.songEndedAt = null;
+      this.song.currentTime = clamp(seconds - SONG_LEAD_IN, 0, this.song.duration || 233.7);
+    }
   }
   // live energy + onset detection; null in procedural mode. The mastered
   // track is loud across all bands, so energy follows the time-domain RMS
@@ -338,22 +329,18 @@ function brushTarget() {
   const amp = .26 + score.wave * .18;
   const autoX = state.width * (.58 + Math.sin(state.wavePhase * .9) * .17);
   const autoY = state.height * (.47 + Math.sin(state.wavePhase) * amp + Math.sin(state.wavePhase * 2.3 + 1.3) * .05);
-  const k = state.pointer.blend;
-  // the brush never hugs the right edge: the canvas ahead stays blank so the
-  // scroll always reveals fresh paper, exactly like the original
+  // The spring/damper below provides the physical smoothing.  A second
+  // time-based blend made a stationary finger expire after 1.6 seconds and
+  // let the automatic gesture take control while it was still held down.
+  const k = state.pointer.active ? 1 : 0;
   return clampTarget(lerp(autoX, state.pointer.x, k), lerp(autoY, state.pointer.y, k));
 }
 
 function clampTarget(x, y) {
-  return {
-    x: clamp(x, state.width * .08, state.width * .7),
-    y: clamp(y, state.height * .07, state.height * .93)
-  };
-}
-
-function updatePointerBlend(dt) {
-  const active = performance.now() - state.pointer.lastMove < 1600;
-  state.pointer.blend += ((active ? 1 : 0) - state.pointer.blend) * Math.min(1, dt * 2.6);
+  // The recovered reference tracks raw pointer coordinates across the whole
+  // stage.  Keeping 8%/30% dead zones made touch input feel especially
+  // constrained and was not part of the original interaction contract.
+  return clampToViewport(x, y, state.width, state.height);
 }
 
 function updateBrush(dt, score) {
@@ -398,8 +385,11 @@ function advanceCamera(distance) {
   state.cameraX -= shift;
   for (const p of state.pools) p.x -= shift;
   for (const p of state.particles) p.x -= shift;
+  for (const p of state.bluePetals) p.x -= shift;
   for (const f of state.figures) f.x -= shift;
   for (const r of state.ribbon) r.x -= shift;
+  if (state.holdPoint) state.holdPoint.x -= shift;
+  if (state.pendingResume) state.pendingResume.x -= shift;
 }
 
 // ---- brush model ported from the recovered engine: nib, pressure, dryness ----
@@ -584,17 +574,37 @@ function stepParticles(dt) {
     p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= decay; p.vy *= decay;
     if (p.life <= 0) state.particles.splice(i, 1);
   }
+  for (const petal of state.bluePetals) petal.age += dt;
 }
 
 function drawParticles() {
-  if (!state.particles.length) return;
-  worldCtx.save(); worldCtx.globalCompositeOperation = "multiply";
-  for (const p of state.particles) {
-    const a = p.alpha * clamp(p.life, 0, 1);
-    worldCtx.fillStyle = rgba(p.color ?? INK, a);
-    worldCtx.beginPath(); worldCtx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); worldCtx.fill();
+  if (state.particles.length) {
+    worldCtx.save(); worldCtx.globalCompositeOperation = "multiply";
+    for (const p of state.particles) {
+      const a = p.alpha * clamp(p.life, 0, 1);
+      worldCtx.fillStyle = rgba(p.color ?? INK, a);
+      worldCtx.beginPath(); worldCtx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); worldCtx.fill();
+    }
+    worldCtx.restore();
   }
-  worldCtx.restore();
+  // Petals unfold one-by-one instead of arriving as six perfect ellipses in
+  // one frame. Each organic lobe is committed once to the persistent paper.
+  for (let i = state.bluePetals.length - 1; i >= 0; i--) {
+    const p = state.bluePetals[i];
+    if (p.age < p.delay) continue;
+    worldCtx.save();
+    worldCtx.globalCompositeOperation = "multiply";
+    worldCtx.translate(p.x, p.y);
+    worldCtx.rotate(p.rotation);
+    worldCtx.fillStyle = rgba(BLUE_WASH, p.alpha);
+    worldCtx.beginPath();
+    worldCtx.moveTo(0, 0);
+    worldCtx.bezierCurveTo(-p.long * .18, -p.short * (1 + p.rough), -p.long * .72, -p.short * (.8 - p.rough), -p.long, p.short * p.tip);
+    worldCtx.bezierCurveTo(-p.long * .74, p.short * (1.05 + p.rough), -p.long * .17, p.short * (.68 - p.rough), 0, 0);
+    worldCtx.fill();
+    worldCtx.restore();
+    state.bluePetals.splice(i, 1);
+  }
 }
 
 function triggerColorCue(cue) {
@@ -614,24 +624,21 @@ function triggerColorCue(cue) {
     return;
   }
   if (cue.type !== "bluePetals") return;
-  worldCtx.save();
-  worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
-  worldCtx.globalCompositeOperation = "multiply";
-  worldCtx.translate(worldX - state.width * .025, b.y);
-  worldCtx.rotate(b.dirAngle);
   for (let i = 0; i < 6; i++) {
-    const angle = -.85 + i * .3;
     const long = state.width * (.045 + i * .004);
-    const short = long * (.18 + i * .015);
-    worldCtx.save();
-    worldCtx.rotate(angle);
-    worldCtx.fillStyle = rgba(BLUE_WASH, .08 + i * .018);
-    worldCtx.beginPath();
-    worldCtx.ellipse(-long * .2, 0, long, short, 0, 0, Math.PI * 2);
-    worldCtx.fill();
-    worldCtx.restore();
+    state.bluePetals.push({
+      x: worldX - state.width * .025,
+      y: b.y,
+      rotation: b.dirAngle - .85 + i * .3 + (rand() - .5) * .08,
+      long,
+      short: long * (.18 + i * .015),
+      rough: (rand() - .5) * .34,
+      tip: (rand() - .5) * .22,
+      alpha: .13 + i * .018,
+      delay: i * (.08 + rand() * .035),
+      age: 0
+    });
   }
-  worldCtx.restore();
   spawnSplatter(worldX, b.y, state.width * .012, .45, BLUE_WASH, 1.1);
 }
 
@@ -640,11 +647,10 @@ function triggerColorCue(cue) {
 function triggerCue(cue) {
   const b = state.brush;
   if (cue.type === "word") {
-    // The recovered word URLs currently return HTML 404 pages. Keep the cue
-    // visible and deterministic until faithful raster reconstructions exist.
-    spawnFigure("wordText", null, b.x, b.y, {
-      count: 1, size: .13, life: 3, print: true, text: cue.text
-    });
+    // The recovered word URLs are HTML 404 responses, and a generic Georgia
+    // fallback produced huge literal lyrics that do not exist in the matching
+    // original frames (notably "bebes" over the 65-67s blue flower). Omit the
+    // false content until each brush-written word is reconstructed faithfully.
     return;
   }
   const config = CREATURE_CONFIG[cue.type];
@@ -687,7 +693,26 @@ function stepFigures(dt) {
     f.age += dt;
     if (f.age - f.delay > f.life) state.figures.splice(i, 1);
   }
-  if (state.holdPoint && state.time > state.holdUntil) state.holdPoint = null;
+  if (state.holdPoint && state.time > state.holdUntil) {
+    if (state.pendingResume) {
+      const b = state.brush;
+      const x = state.pendingResume.x - state.cameraX;
+      const y = state.pendingResume.y;
+      b.x = b.px = x; b.y = b.py = y;
+      b.vx = b.vy = 0;
+      // The figure itself bridges entry to exit.  Do not let the sliding
+      // ribbon window close that gap with a straight chord through the art.
+      state.ribbon.length = 0;
+      state.ribbonSerial = 0;
+      state.holdPoint = { ...state.pendingResume };
+      state.pendingResume = null;
+      state.holdPaint = true;
+      state.holdUntil = state.time + .12;
+    } else {
+      state.holdPoint = null;
+      state.holdPaint = true;
+    }
+  }
 }
 
 function drawFigures() {
@@ -752,8 +777,7 @@ function drawFigures() {
         const dx = (f.anchors.exit.x - f.anchors.entry.x) * scale;
         const dy = (f.anchors.exit.y - f.anchors.entry.y) * scale;
         const cos = Math.cos(f.rot), sin = Math.sin(f.rot);
-        state.holdPoint = { x: x + dx * cos - dy * sin, y: y + dx * sin + dy * cos };
-        state.holdUntil = state.time + .35;
+        state.pendingResume = { x: x + dx * cos - dy * sin, y: y + dx * sin + dy * cos };
       }
     }
     worldCtx.restore();
@@ -982,7 +1006,6 @@ function step(dt) {
     state.energy = clamp(.16 + state.beatFlash * .5 + phrase * .26, 0, 1);
   }
 
-  updatePointerBlend(dt);
   updateBrush(dt, score);
 
   // Camera scroll ported from the reference engine and calibrated against
@@ -990,7 +1013,7 @@ function step(dt) {
   // 17-22%/s mid-song, 38% at the energetic section, 53-57% at the climax.
   // The reference formula (84 + 360·energy + 360·climax) world px/s over a
   // ~2167px view matches those numbers when driven by real song energy.
-  const pointerBias = state.pointer.blend * (state.pointer.x / state.width - .5) * 2;
+  const pointerBias = (state.pointer.active ? 1 : 0) * (state.pointer.x / state.width - .5) * 2;
   const scrollPct = Math.min(58, params.velocidad * 2.1
     * (4 + 15.5 * state.energy + 14 * params.climax) * (1 + .4 * pointerBias));
   state.debugScrollPct = scrollPct;
@@ -998,16 +1021,19 @@ function step(dt) {
   if (score.mode === "stroke" || score.mode === "drops" || score.mode === "fadeout") {
     if (score.mode !== "fadeout") advanceCamera(scrollPct / 100 * state.width * dt);
     if (score.mode === "drops") stepDrops(dt);
-    else {
+    else if (!(state.holdPoint && !state.holdPaint)) {
       pushRibbonSample(score, dt);
       stepPools(dt);
     }
   }
   stepParticles(dt);
   stepFigures(dt);
-  // during the drop interlude the falling drips carry the scene alone
+  // The drop interlude suppresses unrelated sprites, but its alternating
+  // entrance/exit holes are part of the original falling-ink sequence.
+  for (const cue of cuesBetween(state.previousTime, state.time)) {
+    if (score.mode !== "drops" || cue.type === "holeIn" || cue.type === "holeOut") triggerCue(cue);
+  }
   if (score.mode !== "drops") {
-    for (const cue of cuesBetween(state.previousTime, state.time)) triggerCue(cue);
     for (const cue of eventsBetween(DIRECTED_CUES, state.previousTime, state.time)) triggerDirectedCue(cue);
   }
   for (const cue of eventsBetween(COLOR_CUES, state.previousTime, state.time)) triggerColorCue(cue);
@@ -1030,6 +1056,8 @@ function triggerDirectedCue(cue) {
   if (cue.kind === "brushHold") {
     state.holdUntil = cue.at + cue.duration;
     state.holdPoint = { x: state.cameraX + state.brush.x, y: state.brush.y };
+    state.holdPaint = cue.paint !== false;
+    state.pendingResume = null;
     return;
   }
   const asset = DIRECTED_ASSETS[cue.name];
@@ -1109,7 +1137,7 @@ async function start() {
   ui.endRestart.classList.remove("is-visible"); ui.endReplay.classList.remove("is-visible");
   state.running = true; state.paused = false; state.replay = null;
   state.beatPhase = 0; state.beatFlash = 0; state.energy = .2; state.wavePhase = 0;
-  state.pointer.blend = 0;
+  state.pointer.active = false; state.pointer.id = null;
   state.seed = Math.random() * 1000; resetRng();
   state.dropTimer = 0;
   // the song (when present) becomes the master clock; the timeline then
@@ -1182,19 +1210,43 @@ function clearInk() {
   state.cameraX = 0;
   state.ribbon.length = 0;
   state.ribbonSerial = 0;
-  state.holdPoint = null; state.holdUntil = 0;
-  state.particles.length = 0; state.figures.length = 0; state.pools.length = 0; state.shiftCarry = 0;
+  state.holdPoint = null; state.holdUntil = 0; state.holdPaint = true; state.pendingResume = null;
+  state.particles.length = 0; state.bluePetals.length = 0; state.figures.length = 0; state.pools.length = 0; state.shiftCarry = 0;
 }
 
 function pointerMove(event) {
+  if (event.pointerType !== "mouse" && state.pointer.id !== event.pointerId) return;
   const rect = canvas.getBoundingClientRect();
   state.pointer.x = event.clientX - rect.left;
   state.pointer.y = event.clientY - rect.top;
-  state.pointer.lastMove = performance.now();
+  state.pointer.type = event.pointerType || "mouse";
+  state.pointer.active = true;
+}
+
+function pointerDown(event) {
+  state.pointer.id = event.pointerId;
+  pointerMove(event);
+  canvas.setPointerCapture?.(event.pointerId);
+}
+
+function pointerEnd(event) {
+  if (state.pointer.id !== event.pointerId) return;
+  if (canvas.hasPointerCapture?.(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  state.pointer.id = null;
+  // A mouse still has a meaningful hover position after button-up.  Touch and
+  // pen input end when contact ends, matching the reference's pointer-leave.
+  if (event.pointerType !== "mouse") state.pointer.active = false;
+}
+
+function pointerLeave(event) {
+  if (event.pointerType === "mouse" && state.pointer.id === null) state.pointer.active = false;
 }
 
 canvas.addEventListener("pointermove", pointerMove, { passive: true });
-canvas.addEventListener("pointerdown", pointerMove, { passive: true });
+canvas.addEventListener("pointerdown", pointerDown, { passive: true });
+canvas.addEventListener("pointerup", pointerEnd, { passive: true });
+canvas.addEventListener("pointercancel", pointerEnd, { passive: true });
+canvas.addEventListener("pointerleave", pointerLeave, { passive: true });
 ui.playStart.addEventListener("click", start);
 ui.endRestart.addEventListener("click", start);
 ui.endReplay.addEventListener("click", replayRecording);

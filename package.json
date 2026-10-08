@@ -7,6 +7,6 @@
     "extract:scenes": "node tools/extract-directed-scenes.mjs",
     "generate:choreography": "python tools/convert.py",
     "test": "node --test tests/*.test.js",
-    "check": "node --check dist/main.js && node --check dist/timeline.js && node --check dist/choreography.js && node --check dist/directed-choreography.js && node --check dist/assets.js && node --check dist/timeline-clock.js && node --check dist/replay.js && npm test"
+    "check": "node --check dist/main.js && node --check dist/timeline.js && node --check dist/choreography.js && node --check dist/directed-choreography.js && node --check dist/pointer-target.js && node --check dist/params.js && node --check dist/audio-clock.js && node --check dist/assets.js && node --check dist/timeline-clock.js && node --check dist/replay.js && npm test"
   }
 }
