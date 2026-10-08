@@ -138,7 +138,7 @@ function eventsBetween(events, from, to) {
   return events.filter(event => event.at > from && event.at <= to);
 }
 
-const DIRECTED_LEGACY_TYPES = new Set(["photoFigure"]);
+const DIRECTED_LEGACY_TYPES = new Set(["photoFigure", "lips"]);
 const cuesBetween = (from, to) => eventsBetween(CUES, from, to)
   .filter(cue => !DIRECTED_LEGACY_TYPES.has(cue.type));
 
@@ -660,17 +660,23 @@ function triggerCue(cue) {
   spawnFigure(cue.type, asset, b.x, b.y, { count: cue.count ?? 1, ...config });
 }
 
-function spawnFigure(type, src, x, y, { count = 1, size = .12, life = 3, rise = 0, halo = false, print = false, text = "", exact = false, anchors = null }) {
+function spawnFigure(type, src, x, y, { count = 1, size = .12, life = 3, rise = 0, halo = false, print = false, text = "", exact = false, anchors = null, reveal = null, revealDuration = .4 }) {
+  // Callers pass the current brush position in screen space. Persistent
+  // figures live on the world canvas, so convert exactly once here. Drawing
+  // them with the raw screen X made every semantic cue drift off the visible
+  // camera window as soon as scrolling had begun.
+  const worldX = state.cameraX + x;
   for (let i = 0; i < count; i++) {
     const img = src ? loadSprite(src) : null;
     state.figures.push({
-      type, img, text, halo, print, committed: false, anchors,
-      x: x + (exact ? 0 : (rand() - .5) * state.width * .18),
+      type, img, text, halo, print, exact, committed: false, anchors,
+      reveal, revealDuration, revealProgress: 0,
+      x: worldX + (exact ? 0 : (rand() - .5) * state.width * .18),
       y: y + (exact ? 0 : (rand() - .5) * state.height * .16),
       age: 0, delay: Math.min(i * .09, 1.6), life,
-      longSide: size * state.width * (.85 + rand() * .3),
+      longSide: size * state.width * (exact ? 1 : .85 + rand() * .3),
       rot: exact ? 0 : (rand() - .5) * .7, rise,
-      drift: (rand() - .5) * 30, seed: rand() * 100
+      drift: exact ? 0 : (rand() - .5) * 30, seed: rand() * 100
     });
   }
 }
@@ -694,15 +700,16 @@ function drawFigures() {
     const age = f.age - f.delay;
     // A persistent canvas cannot implement a fade by redrawing: each frame
     // accumulates. Commit prints exactly once; movers deliberately trail.
-    if (f.print && (f.committed || age < .12)) continue;
+    const brushReveal = f.print && f.reveal === "brushDraw";
+    if (f.print && (f.committed || (!brushReveal && age < .12))) continue;
     const alpha = f.print ? .82 : clamp(age * 4, 0, 1) * .13;
     const img = f.img;
     if (f.type !== "wordText" && (!img?.complete || !img.naturalWidth)) continue;
     const scale = f.type === "wordText" ? 1 : f.longSide / Math.max(img.naturalWidth, img.naturalHeight);
     const w = f.type === "wordText" ? f.longSide * 1.8 : img.naturalWidth * scale;
     const h = f.type === "wordText" ? f.longSide * .46 : img.naturalHeight * scale;
-    const x = f.x + f.drift * age - state.time % 1 * 2;
-    const y = f.y - (f.rise ? f.rise * state.height * age : 0) + Math.sin(age * 2 + f.seed) * 4;
+    const x = f.x + (f.exact ? 0 : f.drift * age - state.time % 1 * 2);
+    const y = f.y - (f.rise ? f.rise * state.height * age : 0) + (f.exact ? 0 : Math.sin(age * 2 + f.seed) * 4);
     worldCtx.save();
     worldCtx.translate(x, y);
     worldCtx.rotate(f.rot);
@@ -723,9 +730,23 @@ function drawFigures() {
     } else {
       const drawX = f.anchors ? -f.anchors.entry.x * scale : -w / 2;
       const drawY = f.anchors ? -f.anchors.entry.y * scale : -h / 2;
-      worldCtx.drawImage(img, drawX, drawY, w, h);
+      if (brushReveal) {
+        const progress = clamp(age / Math.max(.001, f.revealDuration), 0, 1);
+        if (progress <= f.revealProgress) { worldCtx.restore(); continue; }
+        const sourceX = Math.floor(img.naturalWidth * f.revealProgress);
+        const sourceEnd = Math.max(sourceX + 1, Math.ceil(img.naturalWidth * progress));
+        const sourceWidth = Math.min(img.naturalWidth - sourceX, sourceEnd - sourceX);
+        worldCtx.drawImage(
+          img,
+          sourceX, 0, sourceWidth, img.naturalHeight,
+          drawX + sourceX * scale, drawY, sourceWidth * scale, h
+        );
+        f.revealProgress = progress;
+      } else {
+        worldCtx.drawImage(img, drawX, drawY, w, h);
+      }
     }
-    if (f.print) {
+    if (f.print && (!brushReveal || f.revealProgress >= 1)) {
       f.committed = true;
       if (f.anchors) {
         const dx = (f.anchors.exit.x - f.anchors.entry.x) * scale;
@@ -996,8 +1017,12 @@ const DIRECTED_ASSETS = {
   chica: {
     type: "photoFigure",
     src: CREATURE_ASSETS.photoFigure,
-    size: .16,
     anchors: { entry: { x: 20, y: 468 }, exit: { x: 812, y: 355 } }
+  },
+  labios: {
+    type: "lips",
+    src: CREATURE_ASSETS.lips,
+    anchors: { entry: { x: 285, y: 635 }, exit: { x: 1062, y: 645 } }
   }
 };
 
@@ -1011,11 +1036,14 @@ function triggerDirectedCue(cue) {
   if (!asset) return;
   spawnFigure(asset.type, asset.src, state.brush.x, state.brush.y, {
     count: 1,
-    size: asset.size,
+    // Director target sizes use Pablo's ~2167px camera coordinate space.
+    size: (cue.spawn.targetLongSide ?? 340) / 2167,
     life: cue.spawn.life ?? 3,
     print: true,
     exact: true,
-    anchors: asset.anchors
+    anchors: asset.anchors,
+    reveal: cue.spawn.reveal,
+    revealDuration: cue.spawn.revealDuration
   });
 }
 

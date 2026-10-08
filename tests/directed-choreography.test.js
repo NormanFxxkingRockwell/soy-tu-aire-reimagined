@@ -9,8 +9,7 @@ test("scene rules prefer time-ranged variants", () => {
 });
 
 test("the first migrated scene preserves hold, attachment and reveal timing", () => {
-  assert.equal(DIRECTED_CUES.length, 2);
-  const [hold, spawn] = DIRECTED_CUES;
+  const [hold, spawn] = DIRECTED_CUES.filter(cue => cue.name === "chica");
   assert.equal(hold.kind, "brushHold");
   assert.equal(hold.at, 23.34);
   assert.equal(hold.paint, false);
@@ -18,6 +17,19 @@ test("the first migrated scene preserves hold, attachment and reveal timing", ()
   assert.equal(spawn.at, 23.42);
   assert.equal(spawn.spawn.attachment, "brushHead");
   assert.equal(spawn.spawn.reveal, "brushDraw");
+});
+
+test("labios keeps its brush-drawn entry, hold and anchored exit", () => {
+  const cues = buildDirectedCues(["labios"]);
+  const hold = cues.find(cue => cue.kind === "brushHold");
+  const spawn = cues.find(cue => cue.kind === "spawn");
+  assert.ok(hold);
+  assert.ok(spawn);
+  assert.equal(spawn.spawn.attachment, "brushHead");
+  assert.equal(spawn.spawn.reveal, "brushDraw");
+  assert.equal(spawn.spawn.revealDuration, .7);
+  assert.ok(spawn.at > hold.at);
+  assert.ok(spawn.at < hold.at + hold.duration);
 });
 
 test("directed cue expansion preserves stagger instead of merging bursts", () => {

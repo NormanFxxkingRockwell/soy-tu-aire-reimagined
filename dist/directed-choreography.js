@@ -44,6 +44,6 @@ export function buildDirectedCues(names, events = RAW_EVENTS, rules = SCENE_RULE
   return cues.sort((a, b) => a.at - b.at);
 }
 
-// Scenes are enabled only after their visual contract has an implementation
-// and an original-recording comparison. Chica is the first migrated scene.
-export const DIRECTED_CUES = buildDirectedCues(["chica"]);
+// Scenes are enabled only after their visual contract has an implementation.
+// Chica and labios share the anchored brushDraw/brushResume contract.
+export const DIRECTED_CUES = buildDirectedCues(["chica", "labios"]);
