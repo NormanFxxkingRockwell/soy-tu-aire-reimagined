@@ -413,8 +413,8 @@ function brushMetrics(score, dt) {
   while (delta > Math.PI) delta -= 2 * Math.PI;
   while (delta < -Math.PI) delta += 2 * Math.PI;
   b.dirAngle += delta * Math.min(1, dt * 9);
-  const nib = .7 + .85 * Math.sin(.085 * b.nibT * 60);
-  const nibFactor = (.28 + .72 * Math.abs(Math.sin(b.dirAngle - nib))) / (.28 + .72 * .637);
+  const nib = .7 + .85 * Math.sin(.9 * b.nibT);
+  const nibFactor = (.6 + .4 * Math.abs(Math.sin(b.dirAngle - nib))) / (.6 + .4 * .637);
   b.previousSpeed = speed;
   const base = state.width * .0062;
   const rawWidth = Math.max(base * .22, base * (.2 + 1.55 * pressure + 1.55 * headPool + .45 * climax)
@@ -449,7 +449,7 @@ function drawRibbonWindow(score) {
     let a = i, b = i;
     while (a > 0 && s[a].break) a--;
     while (b < s.length - 1 && s[b].break) b++;
-    const p = s[Math.max(0, a - 1)], q = s[Math.min(s.length - 1, b + 1)];
+    const p = s[Math.max(0, a - 2)], q = s[Math.min(s.length - 1, b + 2)];
     const dx = q.x - p.x, dy = q.y - p.y;
     const len = Math.hypot(dx, dy) || 1;
     return { x: -dy / len, y: dx / len };
@@ -483,15 +483,7 @@ function drawRibbonWindow(score) {
   if (score.wet > .5 && last.w > 4) layer(0, 1.3, rgba(INK, .08 * last.a));
   layer(0, .94, rgba(INK, .17 * last.a * tone));
   layer(-.11, .48, rgba(INK_CORE, .13 * last.a));
-  if (last.sp > .06) {
-    layer(.06, .05, rgba(LIGHT, Math.min(.09, .05 * last.sp)));
-    layer(.16, .04, rgba(LIGHT, Math.min(.06, .035 * last.sp)));
-  }
-  if (last.dry > .42) {
-    layer(-.28, .035, rgba(LIGHT, .05 * last.dry));
-    layer(.28, .035, rgba(LIGHT, .05 * last.dry));
-    layer(0, .05, rgba(INK_CORE, .05 * last.dry));
-  }
+  // flying white reads as in-stroke texture in the original — no side lines
   // live brush head
   worldCtx.fillStyle = rgba(INK, .16 * last.a);
   worldCtx.beginPath();
@@ -545,21 +537,8 @@ function drawParticles() {
   worldCtx.save(); worldCtx.globalCompositeOperation = "multiply";
   for (const p of state.particles) {
     const a = p.alpha * clamp(p.life, 0, 1);
-    const speed = Math.hypot(p.vx, p.vy);
-    if (speed > 260) {
-      // fast drops streak along their flight direction
-      const k = clamp(speed / 900, 0, 1.6);
-      worldCtx.strokeStyle = rgba(p.color ?? INK, a);
-      worldCtx.lineWidth = p.radius * 1.5;
-      worldCtx.lineCap = "round";
-      worldCtx.beginPath();
-      worldCtx.moveTo(p.x - p.vx * .016 * k, p.y - p.vy * .016 * k);
-      worldCtx.lineTo(p.x, p.y);
-      worldCtx.stroke();
-    } else {
-      worldCtx.fillStyle = rgba(p.color ?? INK, a);
-      worldCtx.beginPath(); worldCtx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); worldCtx.fill();
-    }
+    worldCtx.fillStyle = rgba(p.color ?? INK, a);
+    worldCtx.beginPath(); worldCtx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); worldCtx.fill();
   }
   worldCtx.restore();
 }
