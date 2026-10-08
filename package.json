@@ -1,0 +1,10 @@
+{
+  "name": "soy-tu-aire-reimagined",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "check": "node --check dist/main.js && node --check dist/timeline.js && npm test"
+  }
+}
