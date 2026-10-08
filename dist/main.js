@@ -327,7 +327,6 @@ function brushTarget() {
     const s = sampleAt(state.replay, state.time);
     return s ? clampTarget(s.x, s.y) : { x: state.width * .55, y: state.height * .5 };
   }
-  if (state.holdPoint) return state.holdPoint;
   const score = state.score ?? scoreAt(state.time);
   const amp = .26 + score.wave * .18;
   const autoX = state.width * (.58 + Math.sin(state.wavePhase * .9) * .17);
@@ -353,14 +352,16 @@ function updatePointerBlend(dt) {
 function updateBrush(dt, score) {
   const b = state.brush;
   state.wavePhase += dt * (1.2 + score.wave * 1.3);
-  const target = state.holdPoint ?? brushTarget();
+  const target = state.holdPoint
+    ? { x: state.holdPoint.x - state.cameraX, y: state.holdPoint.y }
+    : brushTarget();
   const selfLife = (1 - score.wave) * 8 + 6;
   const tx = target.x + noise(state.time * .8) * selfLife;
   const ty = target.y + noise(state.time * .91 + 8) * selfLife;
   // reference integrator: stiff spring with light damping tracks the pointer
   // closely (the old soft spring lagged a full brush-length behind)
-  const spring = state.holdPoint ? 300 : 90;
-  const damping = state.holdPoint ? 30 : 14;
+  const spring = 90;
+  const damping = 14;
   b.vx += ((tx - b.x) * spring - damping * b.vx) * dt;
   b.vy += ((ty - b.y) * spring - damping * b.vy) * dt;
   const maxVelocity = 3600;
@@ -492,7 +493,6 @@ function drawRibbonWindow(score) {
   };
   const last = s[s.length - 1];
   const tone = .9 + noise(state.time * 2.7) * .1;
-  if (last.break) { worldCtx.globalCompositeOperation = "source-over"; return; }
   if (score.wet > .5 && last.w > 4) layer(0, 1.3, rgba(INK, .08 * last.a));
   layer(0, .94, rgba(INK, .17 * last.a * tone));
   layer(-.11, .48, rgba(INK_CORE, .13 * last.a));
@@ -607,10 +607,6 @@ function triggerCue(cue) {
   const config = CREATURE_CONFIG[cue.type];
   const asset = CREATURE_ASSETS[cue.type];
   if (!config || !asset) return;
-  if (config.hold) {
-    state.holdUntil = state.time + config.hold;
-    state.holdPoint = { x: b.x, y: b.y };
-  }
   if (config.burst) {
     // organic cluster bursts: several origins, big mixed drops, not a radial fan
     for (let cluster = 0; cluster < 4; cluster++) {
@@ -693,6 +689,7 @@ function drawFigures() {
         const dy = (f.anchors.exit.y - f.anchors.entry.y) * scale;
         const cos = Math.cos(f.rot), sin = Math.sin(f.rot);
         state.holdPoint = { x: x + dx * cos - dy * sin, y: y + dx * sin + dy * cos };
+        state.holdUntil = state.time + .35;
       }
     }
     worldCtx.restore();
@@ -938,13 +935,7 @@ function step(dt) {
     if (score.mode !== "fadeout") advanceCamera(scrollPct / 100 * state.width * dt);
     if (score.mode === "drops") stepDrops(dt);
     else {
-      if (state.holdPoint) {
-        // pen lift: split the strip so the stroke resumes fresh after the figure
-        if (state.ribbon.length && !state.ribbon[state.ribbon.length - 1].break) {
-          state.ribbon.push({ break: true, x: 0, y: 0, w: 0, a: 0, dry: 0, sp: 0 });
-          if (state.ribbon.length > 48) state.ribbon.shift();
-        }
-      } else pushRibbonSample(score, dt);
+      pushRibbonSample(score, dt);
       stepPools(dt);
     }
   }
@@ -970,7 +961,7 @@ const DIRECTED_ASSETS = {
 function triggerDirectedCue(cue) {
   if (cue.kind === "brushHold") {
     state.holdUntil = cue.at + cue.duration;
-    state.holdPoint = { x: state.brush.x, y: state.brush.y };
+    state.holdPoint = { x: state.cameraX + state.brush.x, y: state.brush.y };
     return;
   }
   const asset = DIRECTED_ASSETS[cue.name];
@@ -1049,7 +1040,6 @@ async function start() {
   state.pointer.blend = 0;
   state.seed = Math.random() * 1000; resetRng();
   state.dropTimer = 0;
-  state.holdUntil = 0; state.holdPoint = null;
   // the song (when present) becomes the master clock; the timeline then
   // begins where the recording begins — video t = song t + 4s
   await soundscape.start();
@@ -1080,7 +1070,6 @@ async function replayRecording() {
   state.accumulator = 0; state.overlayAcc = 0;
   state.beatPhase = 0; state.beatFlash = 0; state.energy = .2; state.wavePhase = 0;
   state.dropTimer = 0;
-  state.holdUntil = 0; state.holdPoint = null;
   const s = sampleAt(state.replay, rt0);
   state.brush.x = state.brush.px = s.x; state.brush.y = state.brush.py = s.y;
   state.brush.vx = state.brush.vy = 0;
@@ -1120,6 +1109,7 @@ function clearInk() {
   fxCtx.clearRect(0, 0, state.width, state.height);
   state.cameraX = 0;
   state.ribbon.length = 0;
+  state.holdPoint = null; state.holdUntil = 0;
   state.particles.length = 0; state.figures.length = 0; state.pools.length = 0; state.shiftCarry = 0;
 }
 
@@ -1151,7 +1141,6 @@ ui.scrubber.addEventListener("click", event => {
   state.time = next; state.previousTime = next; state.accumulator = 0;
   timelineClock.seek(next); state.lastFrame = next; soundscape.seekTo(next);
   state.recording = null; // a seeked timeline can't be replayed as one gesture
-  state.holdUntil = 0; state.holdPoint = null;
   clearInk();
   state.score = scoreAt(state.time);
   const t = brushTarget();
