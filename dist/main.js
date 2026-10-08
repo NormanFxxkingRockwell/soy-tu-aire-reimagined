@@ -1,6 +1,9 @@
-import { DURATION, scoreAt } from "./timeline.js";
+import { COLOR_CUES, DURATION, scoreAt } from "./timeline.js";
 import { PARAMS, CUES } from "./choreography.js";
 import { createRecording, recordSample, sampleAt } from "./replay.js";
+import { CREATURE_ASSETS, PAPER_TEXTURE } from "./assets.js";
+import { TimelineClock } from "./timeline-clock.js";
+import { DIRECTED_CUES } from "./directed-choreography.js";
 
 const $ = selector => document.querySelector(selector);
 const paper = $("#paper");
@@ -35,29 +38,6 @@ const RED_INK = [178, 40, 44];
 // Sprites recovered from the reference build (see README asset notes).
 // ---------------------------------------------------------------------------
 
-const CREATURE_ASSETS = {
-  photoFigure: "assets/words/chica.jpg", birds: "assets/creatures/pajaros.png",
-  koi: "assets/creatures/pezmancha.png", minnows: "assets/creatures/pececillo.png",
-  surco: "assets/words/surcos.jpg", wax: "assets/creatures/cera.png",
-  zipper: "assets/creatures/cremallera.png", tickles: "assets/words/cosquillas.jpg",
-  bigO: "assets/creatures/Ogrande.png", bubbles: "assets/creatures/burbuja.png",
-  waterRings: "assets/creatures/Ondasagua.png", splash: "assets/creatures/salpico.png",
-  memories: "assets/creatures/recuerdo_b.png", teardrop: "assets/creatures/lagrima.png",
-  lips: "assets/creatures/labios.png", butterflies: "assets/creatures/mariposa.png",
-  dandelions: "assets/creatures/dandelion.png", holeIn: "assets/creatures/Entradaagujero.png",
-  holeOut: "assets/creatures/Salidaagujero.png", wire: "assets/creatures/alambre.png",
-  uno: "assets/creatures/uno.png"
-};
-const WORD_ASSETS = {
-  aire: "aire.jpg", surco: "surcos.jpg", surcos: "surcos.jpg", pequenitos: "pequenitos.jpg",
-  derretida: "derretida.jpg", cosquillas: "cosquillas.jpg", cosquilla: "cosquillas.jpg",
-  acomodo: "acomodo.jpg", rias: "rias.jpg", cuelo: "cuelo.jpg", enredo: "enredo.jpg",
-  avisar: "avisar.jpg", agua: "agua.jpg", bebes: "bebes.jpg", atraganto: "atraganto.jpg",
-  respiras: "respiras.jpg", tragas: "tragas.jpg", enaguas: "enaguas.jpg",
-  fantasias: "fantasias.jpg", memoria: "memoria.jpg", imposible: "imposible.jpg",
-  construyo: "construyo.jpg", futuro: "futuro.jpg", improvisado: "improvisado.jpg",
-  unoyuno: "unoyuno.jpg"
-};
 // size: fraction of viewport width · hold: brush pauses while the mark lands
 // print: stamp once with a fade-in (ink print); otherwise light moving stamps
 const CREATURE_CONFIG = {
@@ -78,13 +58,13 @@ const spriteCache = new Map();
 function loadSprite(src) {
   if (spriteCache.has(src)) return spriteCache.get(src);
   const image = new Image();
+  image.addEventListener("error", () => console.warn(`[asset] failed to decode ${src}`), { once: true });
   image.src = src;
   spriteCache.set(src, image);
   return image;
 }
 for (const src of Object.values(CREATURE_ASSETS)) loadSprite(src);
-for (const file of Object.values(WORD_ASSETS)) loadSprite(`assets/words/${file}`);
-const paperTexture = loadSprite("assets/textures/paper.jpg");
+const paperTexture = loadSprite(PAPER_TEXTURE);
 
 // ---------------------------------------------------------------------------
 // State
@@ -139,10 +119,14 @@ function paramAt(seconds) {
   };
 }
 
-function cuesBetween(from, to) {
+function eventsBetween(events, from, to) {
   if (to < from) return [];
-  return CUES.filter(cue => cue.at > from && cue.at <= to);
+  return events.filter(event => event.at > from && event.at <= to);
 }
+
+const DIRECTED_LEGACY_TYPES = new Set(["photoFigure"]);
+const cuesBetween = (from, to) => eventsBetween(CUES, from, to)
+  .filter(cue => !DIRECTED_LEGACY_TYPES.has(cue.type));
 
 class Soundscape {
   constructor() { this.context = null; this.master = null; this.nodes = []; }
@@ -193,10 +177,11 @@ class Soundscape {
     fifth.frequency.setTargetAtTime(146.83 + Math.sin(time * .043) * 18, now, .4);
     filter.frequency.setTargetAtTime(320 + energy * 1150, now, .12);
   }
-  suspend() { if (this.context?.state === "running") this.context.suspend(); }
-  resume() { if (this.context?.state === "suspended") this.context.resume(); }
+  suspend() { return this.context?.state === "running" ? this.context.suspend() : Promise.resolve(); }
+  resume() { return this.context?.state === "suspended" ? this.context.resume() : Promise.resolve(); }
 }
 const soundscape = new Soundscape();
+const timelineClock = new TimelineClock(() => soundscape.context?.currentTime ?? performance.now() / 1000);
 
 function resize() {
   state.width = innerWidth; state.height = innerHeight;
@@ -276,7 +261,7 @@ function updatePointerBlend(dt) {
 function updateBrush(dt, score) {
   const b = state.brush;
   state.wavePhase += dt * (1.2 + score.wave * 1.3);
-  const target = brushTarget();
+  const target = state.holdPoint ?? brushTarget();
   const selfLife = (1 - score.wave) * 8 + 6;
   const tx = target.x + noise(state.time * .8) * selfLife;
   const ty = target.y + noise(state.time * .91 + 8) * selfLife;
@@ -491,14 +476,52 @@ function drawParticles() {
   ctx.restore();
 }
 
+function triggerColorCue(cue) {
+  const b = state.brush;
+  if (cue.type === "blueDroplets") {
+    for (let i = 0; i < 3; i++) {
+      spawnSplatter(
+        b.x + (rand() - .5) * state.width * .06,
+        b.y + (rand() - .5) * state.height * .06,
+        state.width * (.008 + rand() * .008),
+        .35,
+        BLUE_WASH,
+        .75
+      );
+    }
+    return;
+  }
+  if (cue.type !== "bluePetals") return;
+  ctx.save();
+  ctx.globalCompositeOperation = "multiply";
+  ctx.translate(b.x - state.width * .025, b.y);
+  ctx.rotate(b.dirAngle);
+  for (let i = 0; i < 6; i++) {
+    const angle = -.85 + i * .3;
+    const long = state.width * (.045 + i * .004);
+    const short = long * (.18 + i * .015);
+    ctx.save();
+    ctx.rotate(angle);
+    ctx.fillStyle = rgba(BLUE_WASH, .08 + i * .018);
+    ctx.beginPath();
+    ctx.ellipse(-long * .2, 0, long, short, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+  spawnSplatter(b.x, b.y, state.width * .012, .45, BLUE_WASH, 1.1);
+}
+
 // ---- semantic figures: sprites stamped onto the ink like real marks ----
 
 function triggerCue(cue) {
   const b = state.brush;
   if (cue.type === "word") {
-    const file = WORD_ASSETS[cue.text];
-    if (!file) return;
-    spawnFigure("word", `assets/words/${file}`, b.x, b.y, { count: 1 });
+    // The recovered word URLs currently return HTML 404 pages. Keep the cue
+    // visible and deterministic until faithful raster reconstructions exist.
+    spawnFigure("wordText", null, b.x, b.y, {
+      count: 1, size: .13, life: 3, print: true, text: cue.text
+    });
     return;
   }
   const config = CREATURE_CONFIG[cue.type];
@@ -518,15 +541,16 @@ function triggerCue(cue) {
   spawnFigure(cue.type, asset, b.x, b.y, { count: cue.count ?? 1, ...config });
 }
 
-function spawnFigure(type, src, x, y, { count = 1, size = .12, life = 3, rise = 0, halo = false, print = false }) {
+function spawnFigure(type, src, x, y, { count = 1, size = .12, life = 3, rise = 0, halo = false, print = false, text = "", exact = false, anchors = null }) {
   for (let i = 0; i < count; i++) {
-    const img = loadSprite(src);
+    const img = src ? loadSprite(src) : null;
     state.figures.push({
-      type, img, halo, print, x: x + (rand() - .5) * state.width * .18,
-      y: y + (rand() - .5) * state.height * .16,
+      type, img, text, halo, print, committed: false, anchors,
+      x: x + (exact ? 0 : (rand() - .5) * state.width * .18),
+      y: y + (exact ? 0 : (rand() - .5) * state.height * .16),
       age: 0, delay: Math.min(i * .09, 1.6), life,
       longSide: size * state.width * (.85 + rand() * .3),
-      rot: (rand() - .5) * .7, rise,
+      rot: exact ? 0 : (rand() - .5) * .7, rise,
       drift: (rand() - .5) * 30, seed: rand() * 100
     });
   }
@@ -548,15 +572,16 @@ function drawFigures() {
   for (const f of state.figures) {
     if (f.age < f.delay) continue;
     if (f.type === "drip") { drawDrip(f); continue; }
-    const img = f.img;
-    if (!img.complete || !img.naturalWidth) continue;
     const age = f.age - f.delay;
-    // prints land once with a fade-in; movers keep leaving light stamps
-    const stampWindow = f.print ? .3 : f.life;
-    if (age > stampWindow) continue;
-    const alpha = f.print ? clamp(age / .3, 0, 1) * .9 : clamp(age * 4, 0, 1) * .13;
-    const scale = f.longSide / Math.max(img.naturalWidth, img.naturalHeight);
-    const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+    // A persistent canvas cannot implement a fade by redrawing: each frame
+    // accumulates. Commit prints exactly once; movers deliberately trail.
+    if (f.print && (f.committed || age < .12)) continue;
+    const alpha = f.print ? .82 : clamp(age * 4, 0, 1) * .13;
+    const img = f.img;
+    if (f.type !== "wordText" && (!img?.complete || !img.naturalWidth)) continue;
+    const scale = f.type === "wordText" ? 1 : f.longSide / Math.max(img.naturalWidth, img.naturalHeight);
+    const w = f.type === "wordText" ? f.longSide * 1.8 : img.naturalWidth * scale;
+    const h = f.type === "wordText" ? f.longSide * .46 : img.naturalHeight * scale;
     const x = f.x + f.drift * age - state.time % 1 * 2;
     const y = f.y - (f.rise ? f.rise * state.height * age : 0) + Math.sin(age * 2 + f.seed) * 4;
     ctx.save();
@@ -570,7 +595,26 @@ function drawFigures() {
       ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
     }
     ctx.globalAlpha = alpha;
-    ctx.drawImage(img, -w / 2, -h / 2, w, h);
+    if (f.type === "wordText") {
+      ctx.fillStyle = rgba(INK, 1);
+      ctx.font = `italic 600 ${Math.max(13, f.longSide * .38)}px Georgia, serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(f.text, 0, 0);
+    } else {
+      const drawX = f.anchors ? -f.anchors.entry.x * scale : -w / 2;
+      const drawY = f.anchors ? -f.anchors.entry.y * scale : -h / 2;
+      ctx.drawImage(img, drawX, drawY, w, h);
+    }
+    if (f.print) {
+      f.committed = true;
+      if (f.anchors) {
+        const dx = (f.anchors.exit.x - f.anchors.entry.x) * scale;
+        const dy = (f.anchors.exit.y - f.anchors.entry.y) * scale;
+        const cos = Math.cos(f.rot), sin = Math.sin(f.rot);
+        state.holdPoint = { x: x + dx * cos - dy * sin, y: y + dx * sin + dy * cos };
+      }
+    }
     ctx.restore();
   }
   ctx.restore();
@@ -774,7 +818,7 @@ function step(dt) {
       state.beatPhase -= 1;
       state.beatFlash = 1;
       soundscape.thump(clamp(.25 + score.splat * .85, 0, 1));
-      if (score.splat > .18) spawnSplatter(state.brush.x, state.brush.y, Math.max(6, state.width * .014), state.energy, score.blue ? BLUE_WASH : INK);
+      if (score.splat > .18) spawnSplatter(state.brush.x, state.brush.y, Math.max(6, state.width * .014), state.energy, INK);
     }
   }
   state.beatFlash = Math.max(0, state.beatFlash - dt * 2.6);
@@ -807,16 +851,45 @@ function step(dt) {
   // during the drop interlude the falling drips carry the scene alone
   if (score.mode !== "drops") {
     for (const cue of cuesBetween(state.previousTime, state.time)) triggerCue(cue);
+    for (const cue of eventsBetween(DIRECTED_CUES, state.previousTime, state.time)) triggerDirectedCue(cue);
   }
+  for (const cue of eventsBetween(COLOR_CUES, state.previousTime, state.time)) triggerColorCue(cue);
+}
+
+const DIRECTED_ASSETS = {
+  chica: {
+    type: "photoFigure",
+    src: CREATURE_ASSETS.photoFigure,
+    size: .16,
+    anchors: { entry: { x: 20, y: 468 }, exit: { x: 812, y: 355 } }
+  }
+};
+
+function triggerDirectedCue(cue) {
+  if (cue.kind === "brushHold") {
+    state.holdUntil = cue.at + cue.duration;
+    state.holdPoint = { x: state.brush.x, y: state.brush.y };
+    return;
+  }
+  const asset = DIRECTED_ASSETS[cue.name];
+  if (!asset) return;
+  spawnFigure(asset.type, asset.src, state.brush.x, state.brush.y, {
+    count: 1,
+    size: asset.size,
+    life: cue.spawn.life ?? 3,
+    print: true,
+    exact: true,
+    anchors: asset.anchors
+  });
 }
 
 function frame() {
   if (!state.running || state.paused) return;
   state.raf = requestAnimationFrame(frame);
-  // Single clock: rAF timestamps can carry an offset vs performance.now() in
-  // embedded webviews, which would inflate every elapsed delta.
-  const now = performance.now();
-  let elapsed = (now - state.lastFrame) / 1000;
+  // AudioContext is the canonical song clock. rAF/performance clocks can run
+  // on a different timebase in embedded webviews and must not drive cues.
+  const now = timelineClock.now();
+  let elapsed = now - state.lastFrame;
   state.lastFrame = now;
   if (elapsed < 0) elapsed = 0;
   if (elapsed > .25) elapsed = .25;
@@ -871,8 +944,10 @@ async function start() {
   const t = brushTarget();
   state.brush.x = state.brush.px = t.x; state.brush.y = state.brush.py = t.y;
   state.brush.vx = state.brush.vy = 0;
-  state.lastFrame = performance.now();
-  await soundscape.start(); state.raf = requestAnimationFrame(frame);
+  await soundscape.start();
+  timelineClock.reset(0);
+  state.lastFrame = 0;
+  state.raf = requestAnimationFrame(frame);
 }
 
 async function replayRecording() {
@@ -891,16 +966,19 @@ async function replayRecording() {
   const s = sampleAt(state.replay, 0);
   state.brush.x = state.brush.px = s.x; state.brush.y = state.brush.py = s.y;
   state.brush.vx = state.brush.vy = 0;
-  state.lastFrame = performance.now();
-  await soundscape.start(); state.raf = requestAnimationFrame(frame);
+  await soundscape.start();
+  timelineClock.reset(0);
+  state.lastFrame = 0;
+  state.raf = requestAnimationFrame(frame);
 }
 
-function togglePause() {
+async function togglePause() {
   if (!state.running) return;
   if (!state.paused) {
     state.paused = true; cancelAnimationFrame(state.raf); soundscape.suspend();
   } else {
-    state.paused = false; state.lastFrame = performance.now(); soundscape.resume();
+    await soundscape.resume();
+    state.paused = false; state.lastFrame = timelineClock.now();
     state.raf = requestAnimationFrame(frame);
   }
 }
@@ -947,6 +1025,7 @@ ui.scrubber.addEventListener("click", event => {
   const rect = ui.scrubber.getBoundingClientRect();
   const next = clamp((event.clientX - rect.left) / rect.width, 0, 1) * DURATION;
   state.time = next; state.previousTime = next; state.accumulator = 0;
+  timelineClock.seek(next); state.lastFrame = next;
   state.recording = null; // a seeked timeline can't be replayed as one gesture
   state.holdUntil = 0; state.holdPoint = null;
   clearInk();

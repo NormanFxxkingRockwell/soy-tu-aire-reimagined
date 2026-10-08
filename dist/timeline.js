@@ -6,6 +6,13 @@
 
 export const DURATION = 244;
 
+// One-shot colour accents transcribed from the original recording. Blue is a
+// short two-part narrative beat, not a tint applied to the entire 56-68s span.
+export const COLOR_CUES = [
+  { at: 59.2, type: "blueDroplets" },
+  { at: 65.2, type: "bluePetals" }
+];
+
 export const SCORE = [
   { start: 0, end: 5, scroll: 0, wave: 0, splat: 0, wet: .6, bpm: 0, fade: 0, mode: "off" },
   { start: 5, end: 8, scroll: 0, wave: .35, splat: 0, wet: .6, bpm: 0, fade: .0012, mode: "stroke" },
@@ -15,7 +22,10 @@ export const SCORE = [
   { start: 41.8, end: 43, scroll: 1.5, wave: .3, splat: .02, wet: .5, bpm: 96, fade: .001, mode: "stroke" },
   { start: 43, end: 48, scroll: 2.6, wave: .6, splat: .04, wet: .45, bpm: 96, fade: .0018, mode: "stroke" },
   { start: 48, end: 56, scroll: 3.2, wave: .7, splat: .05, wet: .5, bpm: 96, fade: .0015, mode: "stroke" },
-  { start: 56, end: 68, scroll: 3.8, wave: .8, splat: .1, wet: .7, bpm: 104, fade: .0012, mode: "stroke", blue: true },
+  { start: 56, end: 59, scroll: 3.8, wave: .8, splat: .05, wet: .62, bpm: 104, fade: .0012, mode: "stroke" },
+  { start: 59, end: 62, scroll: 3.8, wave: .8, splat: .08, wet: .68, bpm: 104, fade: .0012, mode: "stroke", blueAccent: "droplets" },
+  { start: 62, end: 65, scroll: 3.8, wave: .8, splat: .04, wet: .6, bpm: 104, fade: .0012, mode: "stroke" },
+  { start: 65, end: 68, scroll: 3.8, wave: .8, splat: .08, wet: .7, bpm: 104, fade: .0012, mode: "stroke", blueAccent: "petals" },
   { start: 68, end: 76, scroll: 4.4, wave: .85, splat: .22, wet: .5, bpm: 112, fade: .0009, mode: "stroke" },
   { start: 76, end: 83, scroll: 4.8, wave: .8, splat: .06, wet: .5, bpm: 104, fade: .0012, mode: "stroke" },
   { start: 83, end: 91, scroll: 4.8, wave: .8, splat: .07, wet: .5, bpm: 104, fade: .0011, mode: "stroke" },

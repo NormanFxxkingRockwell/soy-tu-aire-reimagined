@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DURATION, SCORE, scoreAt } from "../dist/timeline.js";
-import { PARAMS, CUES } from "../dist/choreography.js";
+import { COLOR_CUES, DURATION, SCORE, scoreAt } from "../dist/timeline.js";
+import { PARAMS, CUES, RAW_EVENTS, SCENE_RULES } from "../dist/choreography.js";
 
 test("timeline covers the full experience without gaps", () => {
   assert.equal(SCORE[0].start, 0);
@@ -37,6 +37,26 @@ test("section modes occur where transcribed from the video", () => {
   assert.equal(scoreAt(149).mode, "drops");
   assert.equal(scoreAt(240).mode, "fadeout");
   assert.equal(scoreAt(30).mode, "stroke");
+});
+
+test("the original blue accent keeps its two-part timing", () => {
+  assert.equal(scoreAt(58).blueAccent, undefined);
+  assert.equal(scoreAt(60).blueAccent, "droplets");
+  assert.equal(scoreAt(63).blueAccent, undefined);
+  assert.equal(scoreAt(66).blueAccent, "petals");
+  assert.deepEqual(COLOR_CUES.map(cue => cue.type), ["blueDroplets", "bluePetals"]);
+});
+
+test("director metadata survives choreography generation", () => {
+  assert.equal(RAW_EVENTS.length, 184);
+  assert.ok(SCENE_RULES.length >= 28);
+  const chica = SCENE_RULES.find(rule => rule.key === "chica");
+  assert.equal(chica.brushHold.paint, false);
+  assert.equal(chica.creatures.chica[0].attachment, "brushHead");
+  assert.equal(chica.creatures.chica[0].reveal, "brushDraw");
+  const zipper = SCENE_RULES.find(rule => rule.key === "cremallera");
+  assert.equal(zipper.creatures.cremallera[0].reveal, "strokeEmbedded");
+  assert.equal(zipper.creatures.cremallera[0].strokeFit.length, 400);
 });
 
 test("recovered choreography keyframes are ordered and sane", () => {

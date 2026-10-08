@@ -1,10 +1,24 @@
-"""Convert Pablo Zárate's recovered choreography (song time) into our engine's
-cue format (video time = song time + 4s lead-in)."""
-import json, collections
+"""Convert the recovered song score without discarding its director layer.
+
+The source score uses song time; browser exports use video time (+4s lead-in).
+"""
+import argparse
+import collections
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--score", type=Path, default=ROOT / "tools" / "choreography.json")
+parser.add_argument("--scenes", type=Path, default=ROOT / "tools" / "directed-scenes.json")
+parser.add_argument("--output", type=Path, default=ROOT / "dist" / "choreography.js")
+args = parser.parse_args()
 
 OFFSET = 4.0
-data = json.load(open("choreography.json", encoding="utf-8"))
+data = json.loads(args.score.read_text(encoding="utf-8"))
 events = data["events"]
+scene_rules = json.loads(args.scenes.read_text(encoding="utf-8"))
 
 # --- params track: presion / velocidad / climax keyframes ---
 params = []
@@ -68,6 +82,12 @@ def js_cues():
 
 out = f"""// GENERATED from Pablo Zárate's recovered choreography (lab.pablozarate.com)
 // song time + 4s video lead-in. Do not edit by hand; regenerate via tools/convert.py.
+export const RAW_EVENTS = {json.dumps(events, ensure_ascii=False, separators=(',', ':'))};
+
+// Director layer recovered from the reference engine. This preserves holds,
+// attachment points, reveal modes, offsets, stagger and stroke-fit metadata.
+export const SCENE_RULES = {json.dumps(scene_rules, ensure_ascii=False, separators=(',', ':'))};
+
 export const PARAMS = [
 {js_params()}
 ];
@@ -76,7 +96,8 @@ export const CUES = [
 {js_cues()}
 ];
 """
-open(r"D:\MM\soy-tu-aire-reimagined\dist\choreography.js", "w", encoding="utf-8").write(out)
+args.output.write_text(out, encoding="utf-8")
 print(f"params: {len(params)}, cues: {len(cues)}")
+print(f"directed scenes: {len(scene_rules)}")
 types = collections.Counter(c["type"] for c in cues)
 print(dict(types))
