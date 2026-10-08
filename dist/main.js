@@ -391,6 +391,7 @@ function advanceCamera(distance) {
   for (const p of state.pools) p.x -= shift;
   for (const p of state.particles) p.x -= shift;
   for (const f of state.figures) f.x -= shift;
+  for (const r of state.ribbon) r.x -= shift;
 }
 
 // ---- brush model ported from the recovered engine: nib, pressure, dryness ----
@@ -445,7 +446,10 @@ function drawRibbonWindow(score) {
   worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
   worldCtx.globalCompositeOperation = "multiply";
   const normalAt = i => {
-    const p = s[Math.max(0, i - 1)], q = s[Math.min(s.length - 1, i + 1)];
+    let a = i, b = i;
+    while (a > 0 && s[a].break) a--;
+    while (b < s.length - 1 && s[b].break) b++;
+    const p = s[Math.max(0, a - 1)], q = s[Math.min(s.length - 1, b + 1)];
     const dx = q.x - p.x, dy = q.y - p.y;
     const len = Math.hypot(dx, dy) || 1;
     return { x: -dy / len, y: dx / len };
@@ -456,23 +460,26 @@ function drawRibbonWindow(score) {
   };
   const layer = (offMul, wMul, style) => {
     worldCtx.fillStyle = style;
+    let open = false;
+    const edge = (i, sign) => {
+      const sm = s[i];
+      if (sm.break) { open = false; return; }
+      const n = normalAt(i);
+      const w = sm.w * taper(i) * (offMul + sign * wMul * .5);
+      const x = sm.x + n.x * w, y = sm.y + n.y * w;
+      if (!open) { worldCtx.moveTo(x, y); open = true; }
+      else worldCtx.lineTo(x, y);
+    };
     worldCtx.beginPath();
-    for (let i = 0; i < s.length; i++) {
-      const n = normalAt(i);
-      const w = s[i].w * taper(i) * (offMul + wMul * .5);
-      const x = s[i].x + n.x * w, y = s[i].y + n.y * w;
-      i ? worldCtx.lineTo(x, y) : worldCtx.moveTo(x, y);
-    }
-    for (let i = s.length - 1; i >= 0; i--) {
-      const n = normalAt(i);
-      const w = s[i].w * taper(i) * (offMul - wMul * .5);
-      worldCtx.lineTo(s[i].x + n.x * w, s[i].y + n.y * w);
-    }
+    for (let i = 0; i < s.length; i++) edge(i, 1);
+    open = false;
+    for (let i = s.length - 1; i >= 0; i--) edge(i, -1);
     worldCtx.closePath();
     worldCtx.fill();
   };
   const last = s[s.length - 1];
   const tone = .9 + noise(state.time * 2.7) * .1;
+  if (last.break) { worldCtx.globalCompositeOperation = "source-over"; return; }
   if (score.wet > .5 && last.w > 4) layer(0, 1.3, rgba(INK, .08 * last.a));
   layer(0, .94, rgba(INK, .17 * last.a * tone));
   layer(-.11, .48, rgba(INK_CORE, .13 * last.a));
@@ -939,7 +946,13 @@ function step(dt) {
     if (score.mode !== "fadeout") advanceCamera(scrollPct / 100 * state.width * dt);
     if (score.mode === "drops") stepDrops(dt);
     else {
-      if (!state.holdPoint) pushRibbonSample(score, dt);
+      if (state.holdPoint) {
+        // pen lift: split the strip so the stroke resumes fresh after the figure
+        if (state.ribbon.length && !state.ribbon[state.ribbon.length - 1].break) {
+          state.ribbon.push({ break: true, x: 0, y: 0, w: 0, a: 0, dry: 0, sp: 0 });
+          if (state.ribbon.length > 48) state.ribbon.shift();
+        }
+      } else pushRibbonSample(score, dt);
       stepPools(dt);
     }
   }
