@@ -45,5 +45,6 @@ export function buildDirectedCues(names, events = RAW_EVENTS, rules = SCENE_RULE
 }
 
 // Scenes are enabled only after their visual contract has an implementation.
-// Chica and labios share the anchored brushDraw/brushResume contract.
-export const DIRECTED_CUES = buildDirectedCues(["chica", "labios"]);
+// Chica, labios and uno share the anchored brushDraw/brushResume contract;
+// alambre uses the same cue source but expands into several embedded strands.
+export const DIRECTED_CUES = buildDirectedCues(["chica", "labios", "alambre", "uno"]);

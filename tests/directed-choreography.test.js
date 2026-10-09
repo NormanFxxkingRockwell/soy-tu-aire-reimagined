@@ -32,6 +32,22 @@ test("labios keeps its brush-drawn entry, hold and anchored exit", () => {
   assert.ok(spawn.at < hold.at + hold.duration);
 });
 
+test("alambre and uno are migrated to deterministic directed cues", () => {
+  const wire = DIRECTED_CUES.filter(cue => cue.name === "alambre");
+  assert.equal(wire.length, 1);
+  assert.equal(wire[0].at, 154.05);
+  assert.equal(wire[0].spawn.reveal, "strokeEmbedded");
+
+  const uno = DIRECTED_CUES.filter(cue => cue.name === "uno");
+  assert.equal(uno.length, 2);
+  assert.equal(uno[0].kind, "brushHold");
+  assert.equal(uno[0].paint, false);
+  assert.equal(uno[1].kind, "spawn");
+  assert.equal(Number(uno[1].at.toFixed(2)), 161.35);
+  assert.equal(uno[1].spawn.reveal, "brushDraw");
+  assert.equal(uno[1].spawn.revealDuration, .5);
+});
+
 test("directed cue expansion preserves stagger instead of merging bursts", () => {
   const birds = buildDirectedCues(["pajaros"]);
   const flying = birds.filter(cue => cue.name === "pajarosVolando");

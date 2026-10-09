@@ -78,6 +78,7 @@ function loadSprite(src) {
 }
 for (const src of Object.values(CREATURE_ASSETS)) loadSprite(src);
 const paperTexture = loadSprite(PAPER_TEXTURE);
+const portalFigure = loadSprite(CREATURE_ASSETS.holeIn);
 
 // ---------------------------------------------------------------------------
 // State
@@ -123,7 +124,7 @@ function eventsBetween(events, from, to) {
   return events.filter(event => event.at > from && event.at <= to);
 }
 
-const DIRECTED_LEGACY_TYPES = new Set(["photoFigure", "lips"]);
+const DIRECTED_LEGACY_TYPES = new Set(["photoFigure", "lips", "wire", "uno"]);
 const cuesBetween = (from, to) => eventsBetween(CUES, from, to)
   .filter(cue => !DIRECTED_LEGACY_TYPES.has(cue.type));
 
@@ -666,7 +667,7 @@ function triggerCue(cue) {
   spawnFigure(cue.type, asset, b.x, b.y, { count: cue.count ?? 1, ...config });
 }
 
-function spawnFigure(type, src, x, y, { count = 1, size = .12, life = 3, rise = 0, halo = false, print = false, text = "", exact = false, anchors = null, reveal = null, revealDuration = .4 }) {
+function spawnFigure(type, src, x, y, { count = 1, size = .12, life = 3, rise = 0, halo = false, print = false, text = "", exact = false, anchors = null, resumeFromExit = Boolean(anchors), reveal = null, revealDuration = .4, rotation = 0 }) {
   // Callers pass the current brush position in screen space. Persistent
   // figures live on the world canvas, so convert exactly once here. Drawing
   // them with the raw screen X made every semantic cue drift off the visible
@@ -675,13 +676,13 @@ function spawnFigure(type, src, x, y, { count = 1, size = .12, life = 3, rise = 
   for (let i = 0; i < count; i++) {
     const img = src ? loadSprite(src) : null;
     state.figures.push({
-      type, img, text, halo, print, exact, committed: false, anchors,
+      type, img, text, halo, print, exact, committed: false, anchors, resumeFromExit,
       reveal, revealDuration, revealProgress: 0,
       x: worldX + (exact ? 0 : (rand() - .5) * state.width * .18),
       y: y + (exact ? 0 : (rand() - .5) * state.height * .16),
       age: 0, delay: Math.min(i * .09, 1.6), life,
       longSide: size * state.width * (exact ? 1 : .85 + rand() * .3),
-      rot: exact ? 0 : (rand() - .5) * .7, rise,
+      rot: exact ? rotation : (rand() - .5) * .7, rise,
       drift: exact ? 0 : (rand() - .5) * 30, seed: rand() * 100
     });
   }
@@ -725,8 +726,8 @@ function drawFigures() {
     const age = f.age - f.delay;
     // A persistent canvas cannot implement a fade by redrawing: each frame
     // accumulates. Commit prints exactly once; movers deliberately trail.
-    const brushReveal = f.print && f.reveal === "brushDraw";
-    if (f.print && (f.committed || (!brushReveal && age < .12))) continue;
+    const progressiveReveal = f.print && (f.reveal === "brushDraw" || f.reveal === "strokeEmbedded");
+    if (f.print && (f.committed || (!progressiveReveal && age < .12))) continue;
     const alpha = f.print ? .82 : clamp(age * 4, 0, 1) * .13;
     const img = f.img;
     if (f.type !== "wordText" && (!img?.complete || !img.naturalWidth)) continue;
@@ -755,7 +756,7 @@ function drawFigures() {
     } else {
       const drawX = f.anchors ? -f.anchors.entry.x * scale : -w / 2;
       const drawY = f.anchors ? -f.anchors.entry.y * scale : -h / 2;
-      if (brushReveal) {
+      if (progressiveReveal) {
         const progress = clamp(age / Math.max(.001, f.revealDuration), 0, 1);
         if (progress <= f.revealProgress) { worldCtx.restore(); continue; }
         const sourceX = Math.floor(img.naturalWidth * f.revealProgress);
@@ -771,9 +772,9 @@ function drawFigures() {
         worldCtx.drawImage(img, drawX, drawY, w, h);
       }
     }
-    if (f.print && (!brushReveal || f.revealProgress >= 1)) {
+    if (f.print && (!progressiveReveal || f.revealProgress >= 1)) {
       f.committed = true;
-      if (f.anchors) {
+      if (f.anchors && f.resumeFromExit) {
         const dx = (f.anchors.exit.x - f.anchors.entry.x) * scale;
         const dy = (f.anchors.exit.y - f.anchors.entry.y) * scale;
         const cos = Math.cos(f.rot), sin = Math.sin(f.rot);
@@ -790,8 +791,44 @@ function drawFigures() {
 function drawFx() {
   fxCtx.clearRect(0, 0, state.width, state.height);
   const mode = state.score?.mode;
-  if (mode === "blackout" || (state.time >= 41.8 && state.time <= 42.8)) drawSilhouette();
+  drawPortalTransition();
   if (mode === "stroke" || mode === "drops") drawCursorHalo();
+}
+
+const PORTAL_START = 39.72;
+const PORTAL_LIFE = 2.13;
+const easeOutCubic = value => 1 - Math.pow(1 - clamp(value, 0, 1), 3);
+
+function drawPortalTransition() {
+  if (!portalFigure.complete || !portalFigure.naturalWidth) return;
+  const age = state.time - PORTAL_START;
+  if (age < 0 || age > PORTAL_LIFE) return;
+
+  // Recovered portal behavior: a screen-pinned transparent plate starts as a
+  // small ink knot, expands past cover size to create the black takeover, then
+  // its transparent centre and hat man grow through the frame until the outer
+  // ink border exits the viewport. This is a spatial wipe, not a black opacity
+  // crossfade. Times are calibrated against new 5fps frames from 39.6-43.4s.
+  const baseScale = .74 * Math.max(
+    state.width / portalFigure.naturalWidth,
+    state.height / portalFigure.naturalHeight
+  );
+  const lifeProgress = clamp(age / PORTAL_LIFE, 0, 1);
+  const scalePulse = .08
+    + .5 * easeOutCubic(age / .5)
+    + Math.pow(lifeProgress, 1.5) * 3.6
+    + .02 * Math.sin(age * Math.PI * 2.2);
+  const drift = easeOutCubic(age / (PORTAL_LIFE * .78));
+  const scale = baseScale * scalePulse;
+  const w = portalFigure.naturalWidth * scale;
+  const h = portalFigure.naturalHeight * scale;
+  const cx = state.width * .5 - state.width * .055 * drift;
+  const cy = state.height * .46 + state.height * .02 * drift;
+
+  fxCtx.save();
+  fxCtx.globalAlpha = 1 - clamp((age - (PORTAL_LIFE - .12)) / .12, 0, 1);
+  fxCtx.drawImage(portalFigure, cx - w / 2, cy - h / 2, w, h);
+  fxCtx.restore();
 }
 
 function drawCursorHalo() {
@@ -874,6 +911,22 @@ function drawSilhouette() {
       }
     }
   } else {
+    // The recovered Entradaagujero art is the actual second transition plate:
+    // a near life-size hat man framed by tree/ground ink.  Use the authored
+    // raster instead of approximating its silhouette with generic Béziers.
+    if (portalFigure.complete && portalFigure.naturalWidth) {
+      const enter = clamp((t - 41.72) / .24, 0, 1);
+      const leave = 1 - clamp((t - 42.62) / .2, 0, 1);
+      const eased = enter * enter * (3 - 2 * enter);
+      const h = state.height * (1.2 + .1 * eased);
+      const w = h * portalFigure.naturalWidth / portalFigure.naturalHeight;
+      const x = state.width * .23 - w * .5 - (1 - eased) * state.width * .025;
+      const y = state.height * .5 - h * .5;
+      fxCtx.globalAlpha = Math.min(eased, leave);
+      fxCtx.drawImage(portalFigure, x, y, w, h);
+      fxCtx.restore();
+      return;
+    }
     const cx = state.width * .3, cy = state.height * .56;
     fxCtx.fillStyle = "#141412"; fxCtx.strokeStyle = "#141412";
     const px = cx, py = cy, a = 1.35 * s;
@@ -1018,7 +1071,7 @@ function step(dt) {
     * (4 + 15.5 * state.energy + 14 * params.climax) * (1 + .4 * pointerBias));
   state.debugScrollPct = scrollPct;
 
-  if (score.mode === "stroke" || score.mode === "drops" || score.mode === "fadeout") {
+  if (score.mode === "stroke" || score.mode === "drops" || score.mode === "fadeout" || score.mode === "blackout") {
     if (score.mode !== "fadeout") advanceCamera(scrollPct / 100 * state.width * dt);
     if (score.mode === "drops") stepDrops(dt);
     else if (!(state.holdPoint && !state.holdPaint)) {
@@ -1049,8 +1102,49 @@ const DIRECTED_ASSETS = {
     type: "lips",
     src: CREATURE_ASSETS.lips,
     anchors: { entry: { x: 285, y: 635 }, exit: { x: 1062, y: 645 } }
+  },
+  alambre: {
+    type: "wire",
+    src: CREATURE_ASSETS.wire,
+    anchors: { entry: { x: 0, y: 452 }, exit: { x: 1773, y: 452 } },
+    targetLongSide: 760,
+    branches: true
+  },
+  uno: {
+    type: "uno",
+    src: CREATURE_ASSETS.uno,
+    anchors: { entry: { x: 352, y: 531 }, exit: { x: 970, y: 720 } },
+    targetLongSide: 410
   }
 };
+
+function spawnWireBranches(cue, asset) {
+  // In the reference the wire is not one thick decorative band. Several fine
+  // strands peel away from the same old ink knot while the live ribbon keeps
+  // travelling. Keep their layout deterministic so replay and seek agree.
+  const branches = [
+    { dx: -.018, dy: -.068, rotation: -.27, scale: .94 },
+    { dx: -.006, dy: -.022, rotation: -.09, scale: 1.03 },
+    { dx: .005, dy: .024, rotation: .11, scale: 1 },
+    { dx: -.012, dy: .072, rotation: .29, scale: .9 }
+  ];
+  for (const branch of branches) {
+    spawnFigure(asset.type, asset.src,
+      state.brush.x + state.width * branch.dx,
+      state.brush.y + state.height * branch.dy, {
+        count: 1,
+        size: (asset.targetLongSide * branch.scale) / 2167,
+        life: cue.spawn.life ?? 2.8,
+        print: true,
+        exact: true,
+        anchors: asset.anchors,
+        resumeFromExit: false,
+        reveal: "strokeEmbedded",
+        revealDuration: cue.spawn.strokeFit?.revealSeconds ?? .72,
+        rotation: branch.rotation
+      });
+  }
+}
 
 function triggerDirectedCue(cue) {
   if (cue.kind === "brushHold") {
@@ -1062,10 +1156,14 @@ function triggerDirectedCue(cue) {
   }
   const asset = DIRECTED_ASSETS[cue.name];
   if (!asset) return;
+  if (asset.branches) {
+    spawnWireBranches(cue, asset);
+    return;
+  }
   spawnFigure(asset.type, asset.src, state.brush.x, state.brush.y, {
     count: 1,
     // Director target sizes use Pablo's ~2167px camera coordinate space.
-    size: (cue.spawn.targetLongSide ?? 340) / 2167,
+    size: (asset.targetLongSide ?? cue.spawn.targetLongSide ?? 340) / 2167,
     life: cue.spawn.life ?? 3,
     print: true,
     exact: true,
@@ -1119,7 +1217,7 @@ function frame() {
 function updateChrome() {
   const mode = state.score?.mode;
   const cl = ui.experience.classList;
-  cl.toggle("is-black", mode === "blackout");
+  cl.remove("is-black");
   cl.toggle("is-fading", mode === "fadeout");
   cl.toggle("is-end", mode === "fadeout" && state.time >= 233);
   const pct = clamp(state.time / DURATION, 0, 1) * 100;
