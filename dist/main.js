@@ -4,9 +4,9 @@ import { createRecording, recordSample, sampleAt } from "./replay.js";
 import { CREATURE_ASSETS, PAPER_TEXTURE } from "./assets.js";
 import { TimelineClock } from "./timeline-clock.js";
 import { DIRECTED_CUES } from "./directed-choreography.js";
-import { clampToViewport } from "./pointer-target.js";
 import { paramAt } from "./params.js";
 import { mediaTimelineSeconds } from "./audio-clock.js";
+import { cameraView, localToScreen, screenToLocal } from "./camera-view.js";
 
 const $ = selector => document.querySelector(selector);
 const paper = $("#paper");
@@ -24,6 +24,7 @@ const world = document.createElement("canvas");
 const worldCtx = world.getContext("2d", { alpha: true });
 const worldDpr = 1; // resolution trade-off taken from the reference build
 const WORLD_SCREENS = 2.5;
+const WORLD_HEIGHT_SCREENS = 1.5;
 
 const ui = {
   experience: $("#experience"), intro: $("#intro"), playStart: $("#playStart"),
@@ -91,7 +92,8 @@ const state = {
   beatPhase: 0, beatFlash: 0, energy: .2, score: null,
   pointer: { x: innerWidth * .55, y: innerHeight * .5, active: false, id: null, type: "mouse" },
   brush: { x: innerWidth * .55, y: innerHeight * .5, vx: 0, vy: 0, px: innerWidth * .55, py: innerHeight * .5, nibT: 0, previousSpeed: 0, dirAngle: 0, widthEMA: 0, prevWidth: 0 },
-  wavePhase: 0, cameraX: 0, ribbon: [], ribbonSerial: 0, particles: [], bluePetals: [], figures: [], pools: [],
+  wavePhase: 0, cameraX: 0, cameraY: 0, cameraView: null, worldPadY: 0,
+  ribbon: [], ribbonSerial: 0, particles: [], bluePetals: [], figures: [], pools: [],
   dropTimer: 0, holdUntil: 0, holdPoint: null, holdPaint: true, pendingResume: null,
   recording: null, replay: null,
   raf: 0, lastFrame: performance.now(), seed: Math.random() * 1000, rng: null,
@@ -271,13 +273,14 @@ function resize() {
     if (target.style) { target.style.width = `${state.width}px`; target.style.height = `${state.height}px`; }
   }
   world.width = Math.floor(state.width * WORLD_SCREENS * worldDpr);
-  world.height = Math.floor(state.height * worldDpr);
+  world.height = Math.floor(state.height * WORLD_HEIGHT_SCREENS * worldDpr);
+  state.worldPadY = (world.height / worldDpr - state.height) / 2;
   buffer.width = world.width;
   buffer.height = world.height;
   paperCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   fxCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
-  state.cameraX = 0;
+  state.cameraX = 0; state.cameraY = 0; state.cameraView = null;
   makePaper();
 }
 
@@ -334,14 +337,49 @@ function brushTarget() {
   // time-based blend made a stationary finger expire after 1.6 seconds and
   // let the automatic gesture take control while it was still held down.
   const k = state.pointer.active ? 1 : 0;
-  return clampTarget(lerp(autoX, state.pointer.x, k), lerp(autoY, state.pointer.y, k));
+  const screenX = lerp(autoX, state.pointer.x, k);
+  const screenY = lerp(autoY, state.pointer.y, k);
+  const local = screenToLocal(currentCameraView(), state.cameraX, screenX, screenY);
+  return clampTarget(local.x, local.y);
 }
 
 function clampTarget(x, y) {
   // The recovered reference tracks raw pointer coordinates across the whole
   // stage.  Keeping 8%/30% dead zones made touch input feel especially
   // constrained and was not part of the original interaction contract.
-  return clampToViewport(x, y, state.width, state.height);
+  // With cinematic zoom-out the visible world is larger than one viewport.
+  // Keep the full screen reachable by allowing the corresponding padded
+  // local coordinates instead of recreating dead margins at the edges.
+  return {
+    x: clamp(x, -state.width * .3, state.width * 1.3),
+    y: clamp(y, -state.worldPadY, state.height + state.worldPadY)
+  };
+}
+
+function currentCameraView() {
+  const params = paramAt(state.time);
+  return cameraView({
+    width: state.width,
+    height: state.height,
+    worldWidth: world.width / worldDpr,
+    worldHeight: world.height / worldDpr,
+    cameraX: state.cameraX,
+    cameraY: state.cameraY,
+    time: state.time,
+    climax: params.climax
+  });
+}
+
+function updateCameraY(dt) {
+  const pointerY01 = state.pointer.active ? clamp(state.pointer.y / state.height, 0, 1) : .5;
+  const speed = 7 * Math.sin(.16 * state.time)
+    + (pointerY01 - .5) * 84
+    + Math.sin(.6 * state.time) * state.energy * 16;
+  state.cameraY = clamp(state.cameraY + speed * dt, -state.height * .12, state.height * .12);
+}
+
+function setWorldDrawTransform() {
+  worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, state.worldPadY * worldDpr);
 }
 
 function updateBrush(dt, score) {
@@ -364,7 +402,8 @@ function updateBrush(dt, score) {
   if (magnitude > maxVelocity) { b.vx *= maxVelocity / magnitude; b.vy *= maxVelocity / magnitude; }
   b.px = b.x; b.py = b.y;
   b.x += b.vx * dt; b.y += b.vy * dt;
-  b.x = clamp(b.x, -80, state.width + 80); b.y = clamp(b.y, -80, state.height + 80);
+  b.x = clamp(b.x, -state.width * .3, state.width * 1.3);
+  b.y = clamp(b.y, -state.worldPadY, state.height + state.worldPadY);
   b.nibT += dt;
   if (!state.replay && state.recording) recordSample(state.recording, state.time, target.x, target.y);
 }
@@ -443,7 +482,7 @@ function pushRibbonSample(score, dt) {
 function drawRibbonWindow(score) {
   const s = state.ribbon;
   if (s.length < 2) return;
-  worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
+  setWorldDrawTransform();
   worldCtx.globalCompositeOperation = "multiply";
   const normalAt = i => {
     let a = i, b = i;
@@ -539,7 +578,7 @@ function drawRibbonWindow(score) {
 
 function stepPools(dt) {
   if (!state.pools.length) return;
-  worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
+  setWorldDrawTransform();
   const b = state.brush;
   const speed = Math.hypot(b.vx, b.vy);
   worldCtx.save(); worldCtx.globalCompositeOperation = "multiply";
@@ -833,6 +872,8 @@ function drawPortalTransition() {
 
 function drawCursorHalo() {
   const b = state.brush;
+  const view = state.cameraView ?? currentCameraView();
+  const screen = localToScreen(view, state.cameraX, b.x, b.y);
   // the halo ring appears only after the brush has lingered for a moment
   const slow = Math.hypot(b.vx, b.vy) < 220 * state.scale;
   state.cursorDwell = slow ? (state.cursorDwell ?? 0) + OVERLAY_DT : 0;
@@ -841,9 +882,9 @@ function drawCursorHalo() {
   fxCtx.save();
   fxCtx.strokeStyle = "rgba(120,118,112,.16)";
   fxCtx.lineWidth = Math.max(1, 1.2 * state.scale);
-  fxCtx.beginPath(); fxCtx.arc(b.x, b.y, radius, 0, Math.PI * 2); fxCtx.stroke();
+  fxCtx.beginPath(); fxCtx.arc(screen.x, screen.y, radius / view.scale, 0, Math.PI * 2); fxCtx.stroke();
   fxCtx.fillStyle = "rgba(140,138,132,.045)";
-  fxCtx.beginPath(); fxCtx.arc(b.x, b.y, radius, 0, Math.PI * 2); fxCtx.fill();
+  fxCtx.beginPath(); fxCtx.arc(screen.x, screen.y, radius / view.scale, 0, Math.PI * 2); fxCtx.fill();
   fxCtx.restore();
 }
 
@@ -1059,6 +1100,7 @@ function step(dt) {
     state.energy = clamp(.16 + state.beatFlash * .5 + phrase * .26, 0, 1);
   }
 
+  updateCameraY(dt);
   updateBrush(dt, score);
 
   // Camera scroll ported from the reference engine and calibrated against
@@ -1199,7 +1241,7 @@ function frame() {
     // fade the visible window plus a margin ahead, once per overlay tick
     if (state.score && state.score.fade > 0) fadeInk(state.score.fade);
     if (state.score && state.score.mode !== "drops") drawRibbonWindow(state.score);
-    worldCtx.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
+    setWorldDrawTransform();
     drawParticles();
     drawFigures();
     drawFx();
@@ -1208,8 +1250,14 @@ function frame() {
   // camera window blit: the only per-frame copy of the ink
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const sx = Math.max(0, Math.min(world.width - Math.ceil(state.width * worldDpr), Math.floor(state.cameraX * worldDpr)));
-  ctx.drawImage(world, sx, 0, Math.ceil(state.width * worldDpr), world.height, 0, 0, canvas.width, canvas.height);
+  const view = currentCameraView();
+  state.cameraView = view;
+  ctx.drawImage(
+    world,
+    Math.floor(view.sx * worldDpr), Math.floor(view.sy * worldDpr),
+    Math.ceil(view.sw * worldDpr), Math.ceil(view.sh * worldDpr),
+    0, 0, canvas.width, canvas.height
+  );
   updateChrome();
   soundscape.update(state.time, state.energy);
 }
@@ -1305,7 +1353,7 @@ function clearInk() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   fxCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   fxCtx.clearRect(0, 0, state.width, state.height);
-  state.cameraX = 0;
+  state.cameraX = 0; state.cameraY = 0; state.cameraView = null;
   state.ribbon.length = 0;
   state.ribbonSerial = 0;
   state.holdPoint = null; state.holdUntil = 0; state.holdPaint = true; state.pendingResume = null;
