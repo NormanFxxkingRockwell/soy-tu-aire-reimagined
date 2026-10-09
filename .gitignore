@@ -6,4 +6,3 @@ node_modules/
 .codex/
 
 *.log
-dist/assets/song.*

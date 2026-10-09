@@ -48,21 +48,30 @@ Every simulation step records the gesture target at 120 Hz along with the noise
 seed and RNG seed; after the song ends, "repetir tu versión" replays the exact
 run (seeking invalidates the recording, like a cut tape).
 
-## Audio policy
+## Audio and rights notice
 
-The prototype uses an original procedural Web Audio soundscape (drone + beat
-thumps following the storyboard tempo). It does not redistribute the original
-song; a licensed recording can slot in behind the same timeline.
+The study build includes the original song recording so that visual timing can
+be evaluated against the source. The music, Labuat branding and recovered
+artwork remain the property of their respective rights holders; their inclusion
+here does not imply endorsement or a transfer of rights.
 
 ## Asset provenance
 
 `dist/assets/` (creature sprites, ink-word textures, paper texture) and the
 choreography storyboard were recovered from Pablo Zárate's public homage build
 (lab.pablozarate.com/soy-tu-aire), which itself states it was rebuilt from
-archived material. They are borrowed here strictly for this private study of
-the 2009 work and must be replaced or licensed before any public distribution.
+archived material. They are included for non-commercial study and comparison.
 _Soy tu aire_, the original song and artwork remain the property of their
 respective rights holders.
+
+## Reference material and deployment
+
+The private repository keeps the local study bundle under `.refs/` (original
+video/audio captures, extracted frames, comparison screenshots and the Pablo
+reference snapshot). GitHub Pages publishes only `dist/`; `.refs/`, tests and
+documentation are never included in the public deployment artifact.
+
+Pushes to `main` deploy `dist/` through `.github/workflows/pages.yml`.
 
 ## References
 
