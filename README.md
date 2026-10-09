@@ -66,10 +66,11 @@ respective rights holders.
 
 ## Reference material and deployment
 
-The private repository keeps the local study bundle under `.refs/` (original
+The repository keeps the local study bundle under `.refs/` (original
 video/audio captures, extracted frames, comparison screenshots and the Pablo
-reference snapshot). GitHub Pages publishes only `dist/`; `.refs/`, tests and
-documentation are never included in the public deployment artifact.
+reference snapshot). GitHub Pages publishes only `dist/` as the website
+artifact, although `.refs/`, tests and documentation remain visible in the
+public source repository.
 
 Pushes to `main` deploy `dist/` through `.github/workflows/pages.yml`.
 
